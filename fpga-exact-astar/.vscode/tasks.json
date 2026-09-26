@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Exact A*",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\build_windows.ps1"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Test Exact A* vs Golden",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\tests\\test_windows.ps1"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "Build Exact A*",
+      "problemMatcher": []
+    }
+  ]
+}
+

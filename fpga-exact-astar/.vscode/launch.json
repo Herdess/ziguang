@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Exact A* sample",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\build\\exact_astar.exe",
+      "args": [
+        "--solver", "astar",
+        "--input", "${workspaceFolder}\\tests\\golden_sample.csv",
+        "--output", "${workspaceFolder}\\build\\astar_result.csv",
+        "--limit", "8"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build Exact A*",
+      "externalConsole": false,
+      "MIMode": "gdb"
+    }
+  ]
+}
+
