@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build Exact A*",
+      "label": "Build Competition estimate",
       "type": "shell",
       "command": "powershell.exe",
       "args": [
@@ -17,7 +17,7 @@
       "problemMatcher": ["$gcc"]
     },
     {
-      "label": "Test Exact A* vs Golden",
+      "label": "Test Competition Submission",
       "type": "shell",
       "command": "powershell.exe",
       "args": [
@@ -28,9 +28,23 @@
         "${workspaceFolder}\\tests\\test_windows.ps1"
       ],
       "options": { "cwd": "${workspaceFolder}" },
-      "dependsOn": "Build Exact A*",
+      "dependsOn": "Build Competition estimate",
+      "problemMatcher": []
+    },
+    {
+      "label": "Package Windows Submission Example",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\package_submission_windows.ps1"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "Test Competition Submission",
       "problemMatcher": []
     }
   ]
 }
-

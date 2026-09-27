@@ -1,0 +1,18 @@
+{
+  "folders": [
+    {
+      "name": "Exact AStar",
+      "path": "."
+    },
+    {
+      "name": "Original ziguang26-main",
+      "path": "../../ziguang26-main"
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/.tools": true
+    },
+    "C_Cpp.default.cppStandard": "c++17"
+  }
+}

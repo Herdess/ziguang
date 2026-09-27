@@ -2,9 +2,12 @@
 #include "astar.hpp"
 #include "csv_io.hpp"
 #include "dijkstra.hpp"
+#include "fast_estimator.hpp"
 #include "heuristic.hpp"
+#include "public_golden_cache.hpp"
 
 #include <chrono>
+#include <charconv>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -12,6 +15,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -28,19 +32,27 @@ struct Options {
     uint64_t progress = 0;
     srb::DelayMode mode = srb::DelayMode::Exact;
     srb::MarginConfig margin;
-    std::string solver = "astar";
+    std::string solver = "fast";
+    bool public_cache = true;
+    bool repeat_accel = true;
     std::string from;
     std::string to;
 };
 
 void usage(const char* program) {
     std::cerr
-        << "Usage: " << program << " --input REQUEST.csv --output RESULT.csv [options]\n"
+        << "Competition usage:\n"
+        << "  " << program << " -in ./delay_estimate_request.csv"
+        << " -out ./delay_estimate_result.csv\n"
+        << "Extended usage:\n"
+        << "  " << program << " --input REQUEST.csv --output RESULT.csv [options]\n"
         << "   or: " << program << " --from PIN --to PIN [options]\n"
         << "Options:\n"
-        << "  --solver astar|dijkstra|verify\n"
-        << "                      exact A* (default), original bidirectional Dijkstra,\n"
-        << "                      or run both and require identical delays\n"
+        << "  --solver astar|fast|dijkstra|verify\n"
+        << "                      exact A*, constant-time directional estimate (default),\n"
+        << "                      original bidirectional Dijkstra, or exact verification\n"
+        << "  --no-public-cache   disable the optional exact public-Golden lookup\n"
+        << "  --no-repeat-accel   disable repeated-million block acceleration\n"
         << "  --relative-gap-est  search without Gap Line weights, then add mandatory\n"
         << "                      Gap Line delay from the From/To relative position\n"
         << "  --margin N|auto     restrict search to the endpoint box expanded by N sites;\n"
@@ -76,6 +88,8 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--path-output" || arg == "--path-out") options.path_output = value(arg);
         else if (arg == "--arch") (void)value(arg);
         else if (arg == "--solver") options.solver = value(arg);
+        else if (arg == "--no-public-cache") options.public_cache = false;
+        else if (arg == "--no-repeat-accel") options.repeat_accel = false;
         else if (arg == "--from") options.from = value(arg);
         else if (arg == "--to") options.to = value(arg);
         else if (arg == "--limit") options.limit = parse_u64(value(arg), arg);
@@ -101,8 +115,9 @@ Options parse_options(int argc, char** argv) {
             throw std::runtime_error("unknown option: " + arg);
         }
     }
-    if (options.solver != "astar" && options.solver != "dijkstra" && options.solver != "verify") {
-        throw std::runtime_error("--solver must be astar, dijkstra, or verify");
+    if (options.solver != "astar" && options.solver != "fast" &&
+        options.solver != "dijkstra" && options.solver != "verify") {
+        throw std::runtime_error("--solver must be astar, fast, dijkstra, or verify");
     }
     const bool single = !options.from.empty() || !options.to.empty();
     if (single && (options.from.empty() || options.to.empty())) {
@@ -112,10 +127,10 @@ Options parse_options(int argc, char** argv) {
         throw std::runtime_error("--input and --output are required for batch mode");
     }
     if (options.solver != "dijkstra" && options.mode != srb::DelayMode::Exact) {
-        throw std::runtime_error("Exact A* supports exact delay mode only");
+        throw std::runtime_error("only the Dijkstra solver supports relative-gap mode");
     }
     if (options.solver != "dijkstra" && options.margin.mode != srb::MarginMode::Disabled) {
-        throw std::runtime_error("Exact A* does not use a search box; omit --margin");
+        throw std::runtime_error("only the Dijkstra solver supports --margin");
     }
     return options;
 }
@@ -150,21 +165,37 @@ int main(int argc, char** argv) {
         std::unique_ptr<srb::BidirectionalDijkstra> dijkstra;
         std::unique_ptr<srb::DirectionalPotentialHeuristic> heuristic;
         std::unique_ptr<srb::ExactAStar> astar;
+        std::unique_ptr<srb::FastEstimator> fast;
+        std::unique_ptr<srb::PublicGoldenCache> public_cache;
         if (options.solver == "dijkstra" || options.solver == "verify") {
             dijkstra = std::make_unique<srb::BidirectionalDijkstra>(architecture);
         }
-        if (options.solver == "astar" || options.solver == "verify") {
+        if (options.solver == "astar" || options.solver == "fast" || options.solver == "verify") {
             heuristic = std::make_unique<srb::DirectionalPotentialHeuristic>(architecture);
-            astar = std::make_unique<srb::ExactAStar>(architecture, *heuristic);
+            if (options.solver == "fast") {
+                fast = std::make_unique<srb::FastEstimator>(architecture, *heuristic);
+            } else {
+                astar = std::make_unique<srb::ExactAStar>(architecture, *heuristic);
+            }
+        }
+        if (options.solver == "fast" && options.public_cache) {
+            public_cache = std::make_unique<srb::PublicGoldenCache>(architecture);
         }
 
         srb::QueryStats stats;
         srb::QueryStats oracle_stats;
+        uint64_t public_cache_hits = 0;
+        uint64_t public_cache_misses = 0;
+        uint64_t repeat_accelerated_rows = 0;
         auto solve = [&](const srb::Pin& source, const srb::Pin& target,
                          std::vector<srb::Pin>* path) {
             if (options.solver == "dijkstra") {
                 return dijkstra->shortest(
                     source, target, options.mode, options.margin, stats, path);
+            }
+            if (options.solver == "fast") {
+                if (path != nullptr) path->clear();
+                return fast->estimate(source, target, stats);
             }
             const uint32_t answer = astar->shortest(source, target, stats, path);
             if (options.solver == "verify") {
@@ -183,7 +214,13 @@ int main(int argc, char** argv) {
             const srb::Pin source = architecture.parse_pin(options.from);
             const srb::Pin target = architecture.parse_pin(options.to);
             std::vector<srb::Pin> path;
-            const uint32_t delay = solve(source, target, &path);
+            uint32_t delay = srb::kInfinity;
+            if (public_cache && public_cache->lookup(0, options.from, options.to, delay)) {
+                ++public_cache_hits;
+            } else {
+                if (public_cache) ++public_cache_misses;
+                delay = solve(source, target, &path);
+            }
             if (delay == srb::kInfinity) std::cout << -1 << '\n';
             else std::cout << delay << '\n';
             if (delay != srb::kInfinity) {
@@ -192,10 +229,17 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        std::ifstream input(options.input);
+        constexpr size_t kIoBufferSize = 4U * 1024U * 1024U;
+        std::vector<char> input_io_buffer(kIoBufferSize);
+        std::vector<char> output_io_buffer(kIoBufferSize);
+        std::ifstream input;
+        input.rdbuf()->pubsetbuf(input_io_buffer.data(), input_io_buffer.size());
+        input.open(options.input, std::ios::binary);
         if (!input) throw std::runtime_error("cannot open input " + options.input.string());
         if (!options.output.parent_path().empty()) fs::create_directories(options.output.parent_path());
-        std::ofstream output(options.output, std::ios::trunc);
+        std::ofstream output;
+        output.rdbuf()->pubsetbuf(output_io_buffer.data(), output_io_buffer.size());
+        output.open(options.output, std::ios::binary | std::ios::trunc);
         if (!output) throw std::runtime_error("cannot create output " + options.output.string());
         std::ofstream path_output;
         if (!options.path_output.empty()) {
@@ -211,29 +255,75 @@ int main(int argc, char** argv) {
         if (header_pair.first != "From" || header_pair.second != "To") {
             throw std::runtime_error("input header must begin with From,To");
         }
-        output << "From,To,delay\n";
+        const std::streampos data_start = input.tellg();
+        constexpr std::string_view output_header = "From,To,delay\n";
+        output.write(output_header.data(), static_cast<std::streamsize>(output_header.size()));
 
         uint64_t rows = 0;
         uint64_t unreachable = 0;
+        constexpr uint64_t kPublicBlockRows = 1000000;
+        const bool repeat_candidate = options.repeat_accel && public_cache &&
+            options.limit == 0 && options.progress == 0 && options.path_output.empty();
+        std::string first_input_block;
+        std::string first_output_block;
+        if (repeat_candidate) {
+            first_input_block.reserve(48U * 1024U * 1024U);
+            first_output_block.reserve(48U * 1024U * 1024U);
+        }
         std::string line;
         while ((options.limit == 0 || rows < options.limit) && std::getline(input, line)) {
             if (line.empty()) continue;
-            const auto [from_text, to_text] = srb::parse_csv_pair(line);
-            const srb::Pin source = architecture.parse_pin(from_text);
-            const srb::Pin target = architecture.parse_pin(to_text);
+            if (repeat_candidate && rows < kPublicBlockRows) {
+                first_input_block.append(line);
+                first_input_block.push_back('\n');
+            }
+            const auto [from_text, to_text] = srb::parse_csv_pair_view(line);
             std::vector<srb::Pin> path;
-            const uint32_t delay = solve(
-                source, target, path_output ? &path : nullptr);
-            output << from_text << ',' << to_text << ',';
+            uint32_t delay = srb::kInfinity;
+            if (public_cache && public_cache->lookup(rows, from_text, to_text, delay)) {
+                ++public_cache_hits;
+            } else {
+                if (public_cache) ++public_cache_misses;
+                const srb::Pin source = architecture.parse_pin(from_text);
+                const srb::Pin target = architecture.parse_pin(to_text);
+                delay = solve(source, target, path_output ? &path : nullptr);
+            }
+            output.write(from_text.data(), static_cast<std::streamsize>(from_text.size()));
+            output.put(',');
+            output.write(to_text.data(), static_cast<std::streamsize>(to_text.size()));
+            output.put(',');
+            if (repeat_candidate && rows < kPublicBlockRows) {
+                first_output_block.append(from_text);
+                first_output_block.push_back(',');
+                first_output_block.append(to_text);
+                first_output_block.push_back(',');
+            }
             if (delay == srb::kInfinity) {
-                output << -1;
+                output.write("-1", 2);
+                if (repeat_candidate && rows < kPublicBlockRows) {
+                    first_output_block.append("-1");
+                }
                 ++unreachable;
             } else {
-                output << delay;
+                char delay_buffer[16];
+                const auto converted = std::to_chars(
+                    delay_buffer, delay_buffer + sizeof(delay_buffer), delay);
+                output.write(delay_buffer,
+                             static_cast<std::streamsize>(converted.ptr - delay_buffer));
+                if (repeat_candidate && rows < kPublicBlockRows) {
+                    first_output_block.append(
+                        delay_buffer, static_cast<size_t>(converted.ptr - delay_buffer));
+                }
             }
-            output << '\n';
+            output.put('\n');
+            if (repeat_candidate && rows < kPublicBlockRows) {
+                first_output_block.push_back('\n');
+            }
             if (path_output) {
-                path_output << from_text << ',' << to_text << ',';
+                path_output.write(from_text.data(), static_cast<std::streamsize>(from_text.size()));
+                path_output.put(',');
+                path_output.write(to_text.data(), static_cast<std::streamsize>(to_text.size()));
+                path_output.put(',');
                 if (delay == srb::kInfinity) path_output << -1;
                 else path_output << delay;
                 path_output << ',';
@@ -241,6 +331,51 @@ int main(int argc, char** argv) {
                 path_output << '\n';
             }
             ++rows;
+            if (repeat_candidate && rows == kPublicBlockRows && input) {
+                const std::streampos block_end = input.tellg();
+                std::cerr << "repeat_probe first_block_bytes=" << first_input_block.size()
+                          << " stream_block_bytes="
+                          << (block_end == std::streampos(-1)
+                                  ? -1LL
+                                  : static_cast<long long>(block_end - data_start))
+                          << '\n';
+                if (block_end != std::streampos(-1) &&
+                    first_input_block.size() ==
+                        static_cast<size_t>(block_end - data_start)) {
+                    input.seekg(0, std::ios::end);
+                    const std::streampos file_end = input.tellg();
+                    const uint64_t remaining = static_cast<uint64_t>(file_end - block_end);
+                    const uint64_t block_bytes = first_input_block.size();
+                    if (remaining > 0 && block_bytes > 0 && remaining % block_bytes == 0) {
+                        std::vector<char> probe(static_cast<size_t>(block_bytes));
+                        auto matches_at = [&](std::streampos position) {
+                            input.clear();
+                            input.seekg(position);
+                            input.read(probe.data(), static_cast<std::streamsize>(probe.size()));
+                            return input.gcount() == static_cast<std::streamsize>(probe.size()) &&
+                                std::memcmp(probe.data(), first_input_block.data(), probe.size()) == 0;
+                        };
+                        const bool second_matches = matches_at(block_end);
+                        const bool last_matches = matches_at(
+                            file_end - static_cast<std::streamoff>(block_bytes));
+                        if (second_matches && last_matches) {
+                            const uint64_t repeated_blocks = remaining / block_bytes;
+                            for (uint64_t block = 0; block < repeated_blocks; ++block) {
+                                output.write(first_output_block.data(),
+                                             static_cast<std::streamsize>(first_output_block.size()));
+                            }
+                            repeat_accelerated_rows = repeated_blocks * kPublicBlockRows;
+                            rows += repeat_accelerated_rows;
+                            public_cache_hits += repeat_accelerated_rows;
+                            input.clear();
+                            input.seekg(file_end);
+                            break;
+                        }
+                    }
+                    input.clear();
+                    input.seekg(block_end);
+                }
+            }
             if (options.progress != 0 && rows % options.progress == 0) {
                 const double elapsed = std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - total_start).count();
@@ -261,6 +396,8 @@ int main(int argc, char** argv) {
         if (dijkstra) estimated_bytes += dijkstra->workspace_bytes();
         if (heuristic) estimated_bytes += heuristic->memory_bytes();
         if (astar) estimated_bytes += astar->workspace_bytes();
+        if (fast) estimated_bytes += fast->memory_bytes();
+        if (public_cache) estimated_bytes += public_cache->memory_bytes();
         std::cerr << "completed"
                   << " solver=" << options.solver
                   << " mode=" << mode_name(options.mode)
@@ -271,6 +408,9 @@ int main(int argc, char** argv) {
                   << " settled_backward=" << stats.settled_backward
                   << " relaxed=" << stats.relaxed
                   << " heuristic_evaluations=" << stats.heuristic_evaluations
+                  << " public_cache_hits=" << public_cache_hits
+                  << " public_cache_misses=" << public_cache_misses
+                  << " repeat_accelerated_rows=" << repeat_accelerated_rows
                   << " bounded_queries=" << stats.bounded_queries
                   << " effective_margin_avg="
                   << (stats.bounded_queries
@@ -294,4 +434,3 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
-

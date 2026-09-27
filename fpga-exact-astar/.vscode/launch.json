@@ -2,21 +2,18 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run Exact A* sample",
+      "name": "Run competition sample",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}\\build\\exact_astar.exe",
+      "program": "${workspaceFolder}\\build\\estimate.exe",
       "args": [
-        "--solver", "astar",
-        "--input", "${workspaceFolder}\\tests\\golden_sample.csv",
-        "--output", "${workspaceFolder}\\build\\astar_result.csv",
-        "--limit", "8"
+        "-in", "${workspaceFolder}\\examples\\delay_estimate_request.csv",
+        "-out", "${workspaceFolder}\\build\\delay_estimate_result.csv"
       ],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Build Exact A*",
+      "preLaunchTask": "Build Competition estimate",
       "externalConsole": false,
       "MIMode": "gdb"
     }
   ]
 }
-
