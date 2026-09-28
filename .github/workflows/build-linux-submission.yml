@@ -1,0 +1,55 @@
+name: Build Linux submission
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build static Linux estimate
+        working-directory: fpga-exact-astar
+        run: |
+          make clean
+          make -j2 \
+            CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra" \
+            LDFLAGS="-static -static-libgcc -static-libstdc++"
+          chmod 755 estimate
+          file estimate
+          if ldd estimate 2>&1 | grep -qv "not a dynamic executable"; then
+            echo "estimate is not fully static"
+            exit 1
+          fi
+
+      - name: Verify official CLI and Exact oracle
+        working-directory: fpga-exact-astar
+        run: |
+          mkdir -p build
+          ./estimate -in examples/delay_estimate_request.csv -out build/default_result.csv
+          ./estimate --solver verify -in examples/delay_estimate_request.csv -out build/verify_result.csv
+          diff -u examples/delay_estimate_result.expected.csv build/verify_result.csv
+
+      - name: Assemble submission
+        working-directory: fpga-exact-astar
+        run: |
+          mkdir -p linux-submission
+          install -m 755 estimate linux-submission/estimate
+          cp arch/SRB_Inst.json linux-submission/
+          cp arch/SRB_Port.json linux-submission/
+          cp arch/SRB_Arc.json linux-submission/
+          cp arch/SRB_Net.json linux-submission/
+          cp arch/SRB_Gap.json linux-submission/
+          tar -czf ziguang_linux_submission.tar.gz -C linux-submission .
+          (cd linux-submission && zip -9 ../ziguang_linux_submission.zip estimate SRB_Inst.json SRB_Port.json SRB_Arc.json SRB_Net.json SRB_Gap.json)
+          sha256sum estimate ziguang_linux_submission.tar.gz ziguang_linux_submission.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ziguang-linux-submission
+          path: |
+            fpga-exact-astar/ziguang_linux_submission.tar.gz
+            fpga-exact-astar/ziguang_linux_submission.zip
+          if-no-files-found: error
+          retention-days: 30
