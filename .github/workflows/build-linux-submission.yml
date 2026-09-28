@@ -16,7 +16,9 @@ jobs:
           make -j2 \
             CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra" \
             LDFLAGS="-static -static-libgcc -static-libstdc++"
+          strip --strip-all estimate
           chmod 755 estimate
+          ls -lh estimate
           file estimate
           if ldd estimate 2>&1 | grep -qv "not a dynamic executable"; then
             echo "estimate is not fully static"
