@@ -41,15 +41,12 @@ jobs:
           cp arch/SRB_Arc.json linux-submission/
           cp arch/SRB_Net.json linux-submission/
           cp arch/SRB_Gap.json linux-submission/
-          tar -czf ziguang_linux_submission.tar.gz -C linux-submission .
           (cd linux-submission && zip -9 ../ziguang_linux_submission.zip estimate SRB_Inst.json SRB_Port.json SRB_Arc.json SRB_Net.json SRB_Gap.json)
-          sha256sum estimate ziguang_linux_submission.tar.gz ziguang_linux_submission.zip
+          sha256sum estimate ziguang_linux_submission.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: ziguang-linux-submission
-          path: |
-            fpga-exact-astar/ziguang_linux_submission.tar.gz
-            fpga-exact-astar/ziguang_linux_submission.zip
+          path: fpga-exact-astar/ziguang_linux_submission.zip
           if-no-files-found: error
           retention-days: 30
