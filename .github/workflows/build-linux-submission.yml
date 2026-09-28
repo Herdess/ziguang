@@ -36,19 +36,15 @@ jobs:
       - name: Assemble submission
         working-directory: fpga-exact-astar
         run: |
-          mkdir -p linux-submission
-          install -m 755 estimate linux-submission/estimate
-          cp arch/SRB_Inst.json linux-submission/
-          cp arch/SRB_Port.json linux-submission/
-          cp arch/SRB_Arc.json linux-submission/
-          cp arch/SRB_Net.json linux-submission/
-          cp arch/SRB_Gap.json linux-submission/
-          (cd linux-submission && zip -9 ../ziguang_linux_submission.zip estimate SRB_Inst.json SRB_Port.json SRB_Arc.json SRB_Net.json SRB_Gap.json)
-          sha256sum estimate ziguang_linux_submission.zip
+          mkdir -p submission/bin
+          install -m 755 estimate submission/bin/estimate
+          (cd submission && zip -9 -r ../submission.zip bin)
+          unzip -l submission.zip
+          sha256sum estimate submission.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ziguang-linux-submission
-          path: fpga-exact-astar/ziguang_linux_submission.zip
+          name: ziguang-submission
+          path: fpga-exact-astar/submission.zip
           if-no-files-found: error
           retention-days: 30
