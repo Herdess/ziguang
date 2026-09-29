@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import zlib
 from pathlib import Path
 
@@ -92,6 +93,10 @@ def main() -> None:
         print(f"{name}_validation={score:.6f} groups={count} shrink={shrink:g}")
 
     # Absolute placement is absent from the current relative-displacement model.
+    apply("source_x", sx, 120, 500.0)
+    apply("source_y", sy, 550, 500.0)
+    apply("target_x", tx, 120, 500.0)
+    apply("target_y", ty, 550, 500.0)
     apply("source_site_4x4", (sx // 4) * 138 + sy // 4, 30 * 138, 80.0)
     apply("target_site_4x4", (tx // 4) * 138 + ty // 4, 30 * 138, 80.0)
     apply("source_site_2x2", (sx // 2) * 275 + sy // 2, 60 * 275, 120.0)
@@ -138,6 +143,29 @@ def main() -> None:
           len(ports) * zone_count, 100.0)
     apply("target_port_zone", target * zone_count + target_zone,
           len(ports) * zone_count, 100.0)
+
+    # Port names contain structural families (for example ZSEA[0..7]).  Family
+    # interactions have substantially more support than sparse exact-port
+    # triples and therefore generalize to unseen endpoint pairs.
+    ordered_names = [name for name, _ in sorted(ports.items(), key=lambda item: item[1])]
+    family_names = [re.sub(r"\[\d+\]$", "", name) for name in ordered_names]
+    family_index = {name: index for index, name in enumerate(dict.fromkeys(family_names))}
+    family_by_port = np.asarray([family_index[name] for name in family_names], dtype=np.int32)
+    source_family = family_by_port[source]
+    target_family = family_by_port[target]
+    family_count = len(family_index)
+    direction = (np.sign(dx) + 1) * 3 + np.sign(dy) + 1
+    apply("family_direction", (source_family * family_count + target_family) * 9 + direction,
+          family_count * family_count * 9, 80.0)
+    apply("source_family_target_zone", source_family * zone_count + target_zone,
+          family_count * zone_count, 120.0)
+    apply("target_family_source_zone", target_family * zone_count + source_zone,
+          family_count * zone_count, 120.0)
+    apply("zone_pair_direction", (source_zone * zone_count + target_zone) * 9 + direction,
+          zone_count * zone_count * 9, 80.0)
+    midpoint_group = (midpoint_x // 4) * 138 + midpoint_y // 4
+    apply("midpoint_direction", midpoint_group * 9 + direction,
+          30 * 138 * 9, 100.0)
 
     rounded = np.maximum(0, np.rint(prediction)).astype(np.int64)
     print(f"final_train={competition_score(golden[training], rounded[training]):.6f}")

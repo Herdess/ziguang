@@ -102,9 +102,11 @@ def main() -> None:
     ]).astype(np.float32)
 
     positive = (golden > 0) & (estimate > 0)
-    if not np.all(positive):
-        raise ValueError("residual training currently requires positive delays")
-    target_residual = np.log(golden / estimate).astype(np.float32)
+    fit_training = training & positive
+    fit_validation = validation & positive
+    target_residual = np.zeros(golden.size, dtype=np.float32)
+    target_residual[positive] = np.log(
+        golden[positive] / estimate[positive]).astype(np.float32)
     categorical_names = {
         "source_port", "target_port", "direction", "block_mask",
         "source_x_zone", "source_y_zone", "target_x_zone", "target_y_zone",
@@ -114,10 +116,10 @@ def main() -> None:
                    if name in categorical_names]
 
     train_set = lgb.Dataset(
-        features[training], label=target_residual[training],
+        features[fit_training], label=target_residual[fit_training],
         feature_name=names, categorical_feature=categorical, free_raw_data=False)
     validation_set = lgb.Dataset(
-        features[validation], label=target_residual[validation],
+        features[fit_validation], label=target_residual[fit_validation],
         feature_name=names, categorical_feature=categorical,
         reference=train_set, free_raw_data=False)
     params = {
@@ -145,11 +147,15 @@ def main() -> None:
         valid_sets=[validation_set], valid_names=["validation"],
         callbacks=[lgb.early_stopping(80), lgb.log_evaluation(50)])
 
-    residual = model.predict(features[validation], num_iteration=model.best_iteration)
-    prediction = np.maximum(
-        0, np.rint(estimate[validation] * np.exp(residual))).astype(np.int64)
+    prediction = estimate[validation].astype(np.int64).copy()
+    residual = model.predict(
+        features[fit_validation], num_iteration=model.best_iteration)
+    prediction[positive[validation]] = np.maximum(
+        0, np.rint(estimate[fit_validation] * np.exp(residual))).astype(np.int64)
     score = competition_score(golden[validation], prediction)
-    relative = np.abs(prediction - golden[validation]) / golden[validation]
+    nonzero = golden[validation] > 0
+    relative = (np.abs(prediction[nonzero] - golden[validation][nonzero]) /
+                golden[validation][nonzero])
     print(f"validation_fold={args.validation_fold}")
     print(f"best_iteration={model.best_iteration}")
     print(f"baseline_score={competition_score(golden[validation], estimate[validation]):.6f}")
