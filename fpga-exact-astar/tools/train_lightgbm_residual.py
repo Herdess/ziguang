@@ -60,6 +60,8 @@ def main() -> None:
                         help="optional compressed holdout predictions for ensembling")
     parser.add_argument("--target-encoding", action="store_true",
                         help="add leakage-safe category residual statistics")
+    parser.add_argument("--objective", choices=("l1", "huber", "fair"),
+                        default="l1")
     parser.add_argument("--base", choices=("calibrated", "raw"),
                         default="calibrated")
     args = parser.parse_args()
@@ -287,8 +289,13 @@ def main() -> None:
         features[fit_validation], label=target_residual[fit_validation],
         feature_name=names, categorical_feature=categorical,
         reference=train_set, free_raw_data=False)
+    objectives = {
+        "l1": "regression_l1",
+        "huber": "huber",
+        "fair": "fair",
+    }
     params = {
-        "objective": "regression_l1",
+        "objective": objectives[args.objective],
         "metric": "l1",
         "learning_rate": 0.035,
         "num_leaves": args.leaves,
@@ -310,6 +317,12 @@ def main() -> None:
         "verbosity": -1,
         "force_col_wise": True,
     }
+    if args.objective == "huber":
+        params["alpha"] = 0.85
+    elif args.objective == "fair":
+        # Residuals are logarithmic relative errors and are usually only a
+        # few hundredths, so the default fair_c=1 would behave almost like L2.
+        params["fair_c"] = 0.02
     model = lgb.train(
         params, train_set, num_boost_round=args.rounds,
         valid_sets=[validation_set], valid_names=["validation"],
@@ -334,6 +347,7 @@ def main() -> None:
     print(f"base={args.base}")
     print(f"seed={args.seed}")
     print(f"target_encoding={args.target_encoding}")
+    print(f"objective={args.objective}")
     print(f"best_iteration={model.best_iteration}")
     print(f"base_score={competition_score(golden[validation], base_estimate[validation]):.6f}")
     print(f"calibrated_score={competition_score(golden[validation], estimate[validation]):.6f}")
