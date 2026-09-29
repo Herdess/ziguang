@@ -2,6 +2,14 @@ name: Train generalization model
 
 on:
   workflow_dispatch:
+    inputs:
+      base:
+        description: Residual baseline
+        type: choice
+        options:
+          - calibrated
+          - raw
+        default: calibrated
 
 jobs:
   train:
@@ -31,6 +39,7 @@ jobs:
             --golden data/delay_estimate_ans.csv \
             --estimate build/model/baseline_no_cache_1m.csv \
             --features build/model/search_features.csv \
+            --base "${{ inputs.base }}" \
             --output-model build/model/generalization_model.txt \
             --rounds 3000 \
             --leaves 48 \
@@ -40,7 +49,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: generalization-model
+          name: generalization-model-${{ inputs.base }}
           path: |
             fpga-exact-astar/build/model/generalization_model.txt
             fpga-exact-astar/build/model/training_report.txt
