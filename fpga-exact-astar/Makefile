@@ -19,6 +19,7 @@ SOURCES := \
 	fast_src/fast_estimator.cpp \
 	fast_src/generalization_model.cpp \
 	fast_src/embedded_generalization_model.cpp \
+	fast_src/prediction_cache.cpp \
 	fast_src/public_golden_cache.cpp \
 	fast_src/csv_io.cpp
 HEADERS := $(wildcard fast_src/*.hpp)

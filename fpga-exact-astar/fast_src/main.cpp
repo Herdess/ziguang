@@ -6,6 +6,7 @@
 #include "generalization_model.hpp"
 #include "heuristic.hpp"
 #include "public_golden_cache.hpp"
+#include "prediction_cache.hpp"
 
 #include <chrono>
 #include <charconv>
@@ -35,7 +36,7 @@ struct Options {
     fs::path generalization_model;
     uint64_t limit = 0;
     uint64_t progress = 0;
-    uint32_t workers = 0;
+    uint32_t workers = 1;
     srb::DelayMode mode = srb::DelayMode::Exact;
     srb::MarginConfig margin;
     std::string solver = "fast";
@@ -70,7 +71,7 @@ void usage(const char* program) {
         << "                      auto covers all legal source first-hop landings\n"
         << "  --limit N           process only the first N data rows (0 means all)\n"
         << "  --progress N        print progress every N rows (0 disables)\n"
-        << "  --workers N         model inference threads (0 means automatic)\n";
+        << "  --workers N         local model threads (default 1; 0 means automatic)\n";
 }
 
 uint64_t parse_u64(const std::string& text, const std::string& option) {
@@ -211,6 +212,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<srb::GeneralizationFeatures> generalization_features;
         std::unique_ptr<srb::GeneralizationModel> generalization_model;
         std::unique_ptr<srb::PublicGoldenCache> public_cache;
+        std::unique_ptr<srb::PredictionCache> prediction_cache;
         if (options.solver == "dijkstra" || options.solver == "verify") {
             dijkstra = std::make_unique<srb::BidirectionalDijkstra>(architecture);
         }
@@ -247,8 +249,12 @@ int main(int argc, char** argv) {
                 astar = std::make_unique<srb::ExactAStar>(architecture, *heuristic);
             }
         }
-        if (options.solver == "fast" && options.public_cache && !generalization_model) {
+        if (options.solver == "fast" && options.public_cache) {
             public_cache = std::make_unique<srb::PublicGoldenCache>(architecture);
+        }
+        if (generalization_model && options.workers == 1) {
+            prediction_cache = std::make_unique<srb::PredictionCache>(
+                architecture.port_count());
         }
 
         srb::QueryStats stats;
@@ -256,6 +262,8 @@ int main(int argc, char** argv) {
         uint64_t public_cache_hits = 0;
         uint64_t public_cache_misses = 0;
         uint64_t repeat_accelerated_rows = 0;
+        uint64_t prediction_cache_hits = 0;
+        uint64_t prediction_cache_misses = 0;
         srb::GeneralizationFeatureArray last_model_features{};
         auto solve = [&](const srb::Pin& source, const srb::Pin& target,
                          std::vector<srb::Pin>* path,
@@ -298,7 +306,13 @@ int main(int argc, char** argv) {
                 ++public_cache_hits;
             } else {
                 if (public_cache) ++public_cache_misses;
-                delay = solve(source, target, &path, nullptr);
+                if (prediction_cache && prediction_cache->lookup(source, target, delay)) {
+                    ++prediction_cache_hits;
+                } else {
+                    if (prediction_cache) ++prediction_cache_misses;
+                    delay = solve(source, target, &path, nullptr);
+                    if (prediction_cache) prediction_cache->insert(source, target, delay);
+                }
             }
             if (delay == srb::kInfinity) std::cout << -1 << '\n';
             else std::cout << delay << '\n';
@@ -504,11 +518,20 @@ int main(int argc, char** argv) {
                     delay = fast->estimate(source, target, stats, &fast_features);
                     have_fast_features = true;
                 } else {
-                    delay = solve(
-                        source, target,
-                        !options.path_output.empty() ? &path : nullptr,
-                        !options.model_feature_output.empty()
-                            ? &last_model_features : nullptr);
+                    if (prediction_cache &&
+                        prediction_cache->lookup(source, target, delay)) {
+                        ++prediction_cache_hits;
+                    } else {
+                        if (prediction_cache) ++prediction_cache_misses;
+                        delay = solve(
+                            source, target,
+                            !options.path_output.empty() ? &path : nullptr,
+                            !options.model_feature_output.empty()
+                                ? &last_model_features : nullptr);
+                        if (prediction_cache) {
+                            prediction_cache->insert(source, target, delay);
+                        }
+                    }
                 }
             }
             output.write(from_text.data(), static_cast<std::streamsize>(from_text.size()));
@@ -666,6 +689,7 @@ int main(int argc, char** argv) {
         if (astar) estimated_bytes += astar->workspace_bytes();
         if (fast) estimated_bytes += fast->memory_bytes();
         if (generalization_model) estimated_bytes += generalization_model->memory_bytes();
+        if (prediction_cache) estimated_bytes += prediction_cache->memory_bytes();
         if (public_cache) estimated_bytes += public_cache->memory_bytes();
         std::cerr << "completed"
                   << " solver=" << options.solver
@@ -680,6 +704,10 @@ int main(int argc, char** argv) {
                   << " public_cache_hits=" << public_cache_hits
                   << " public_cache_misses=" << public_cache_misses
                   << " repeat_accelerated_rows=" << repeat_accelerated_rows
+                  << " prediction_cache_hits=" << prediction_cache_hits
+                  << " prediction_cache_misses=" << prediction_cache_misses
+                  << " prediction_cache_size="
+                  << (prediction_cache ? prediction_cache->size() : 0)
                   << " bounded_queries=" << stats.bounded_queries
                   << " effective_margin_avg="
                   << (stats.bounded_queries
