@@ -56,6 +56,8 @@ def main() -> None:
     parser.add_argument("--checkpoints", default="",
                         help="comma-separated tree counts to evaluate")
     parser.add_argument("--validation-fold", type=int, default=0)
+    parser.add_argument("--train-all", action="store_true",
+                        help="fit the final model on every positive Golden row")
     parser.add_argument("--rounds", type=int, default=1200)
     parser.add_argument("--learning-rate", type=float, default=0.035)
     parser.add_argument("--leaves", type=int, default=48)
@@ -80,6 +82,8 @@ def main() -> None:
     fold = deterministic_fold(args.golden, 5)
     validation = fold == args.validation_fold
     training = ~validation
+    if args.train_all:
+        training = np.ones_like(validation, dtype=bool)
 
     dx = tx - sx
     dy = ty - sy
@@ -297,10 +301,6 @@ def main() -> None:
         train_set = lgb.Dataset(
             features[fit_training], label=target_residual[fit_training],
             feature_name=names, categorical_feature=categorical, free_raw_data=False)
-        validation_set = lgb.Dataset(
-            features[fit_validation], label=target_residual[fit_validation],
-            feature_name=names, categorical_feature=categorical,
-            reference=train_set, free_raw_data=False)
         objectives = {
             "l1": "regression_l1",
             "huber": "huber",
@@ -335,11 +335,21 @@ def main() -> None:
             # Residuals are logarithmic relative errors and are usually only a
             # few hundredths, so fair_c=1 would behave almost like L2.
             params["fair_c"] = 0.02
-        model = lgb.train(
-            params, train_set, num_boost_round=args.rounds,
-            valid_sets=[validation_set], valid_names=["validation"],
-            callbacks=[lgb.early_stopping(80), lgb.log_evaluation(50)])
-        selected_iteration = model.best_iteration
+        if args.train_all:
+            model = lgb.train(
+                params, train_set, num_boost_round=args.rounds,
+                callbacks=[lgb.log_evaluation(50)])
+            selected_iteration = model.current_iteration()
+        else:
+            validation_set = lgb.Dataset(
+                features[fit_validation], label=target_residual[fit_validation],
+                feature_name=names, categorical_feature=categorical,
+                reference=train_set, free_raw_data=False)
+            model = lgb.train(
+                params, train_set, num_boost_round=args.rounds,
+                valid_sets=[validation_set], valid_names=["validation"],
+                callbacks=[lgb.early_stopping(80), lgb.log_evaluation(50)])
+            selected_iteration = model.best_iteration
 
     importance = sorted(
         zip(names, model.feature_importance(importance_type="gain")),
@@ -356,38 +366,45 @@ def main() -> None:
             0, np.rint(base_estimate[fit_validation] * np.exp(residual))).astype(np.int64)
         return prediction_at_iteration, time.perf_counter() - started
 
-    for checkpoint in (int(value) for value in args.checkpoints.split(",") if value):
-        if checkpoint <= 0 or checkpoint > model.current_iteration():
-            raise ValueError(f"invalid checkpoint {checkpoint}")
-        checkpoint_prediction, checkpoint_seconds = predict_validation(checkpoint)
-        print(f"checkpoint={checkpoint} "
-              f"score={competition_score(golden[validation], checkpoint_prediction):.6f} "
-              f"predict_seconds={checkpoint_seconds:.6f}")
-
-    prediction, prediction_seconds = predict_validation(selected_iteration)
-    score = competition_score(golden[validation], prediction)
-    nonzero = golden[validation] > 0
-    relative = (np.abs(prediction[nonzero] - golden[validation][nonzero]) /
-                golden[validation][nonzero])
-    print(f"validation_fold={args.validation_fold}")
     print(f"base={args.base}")
     print(f"seed={args.seed}")
     print(f"target_encoding={args.target_encoding}")
     print(f"objective={args.objective}")
     print(f"learning_rate={args.learning_rate}")
+    print(f"train_all={args.train_all}")
     print(f"best_iteration={selected_iteration}")
-    print(f"validation_predict_seconds={prediction_seconds:.6f}")
-    print(f"base_score={competition_score(golden[validation], base_estimate[validation]):.6f}")
-    print(f"calibrated_score={competition_score(golden[validation], estimate[validation]):.6f}")
-    print(f"model_score={score:.6f}")
-    print(f"mape_percent={relative.mean() * 100.0:.6f}")
-    print("ape_percentiles=" + ",".join(
-        f"{value * 100.0:.4f}" for value in np.quantile(relative, [0.5, 0.9, 0.95, 0.99])))
+    if args.train_all:
+        if args.checkpoints or args.output_validation:
+            raise ValueError("checkpoint scoring requires a held-out validation fold")
+        print(f"training_rows={fit_training.sum()}")
+    else:
+        for checkpoint in (int(value) for value in args.checkpoints.split(",") if value):
+            if checkpoint <= 0 or checkpoint > model.current_iteration():
+                raise ValueError(f"invalid checkpoint {checkpoint}")
+            checkpoint_prediction, checkpoint_seconds = predict_validation(checkpoint)
+            print(f"checkpoint={checkpoint} "
+                  f"score={competition_score(golden[validation], checkpoint_prediction):.6f} "
+                  f"predict_seconds={checkpoint_seconds:.6f}")
+
+        prediction, prediction_seconds = predict_validation(selected_iteration)
+        score = competition_score(golden[validation], prediction)
+        nonzero = golden[validation] > 0
+        relative = (np.abs(prediction[nonzero] - golden[validation][nonzero]) /
+                    golden[validation][nonzero])
+        print(f"validation_fold={args.validation_fold}")
+        print(f"validation_predict_seconds={prediction_seconds:.6f}")
+        print(f"base_score={competition_score(golden[validation], base_estimate[validation]):.6f}")
+        print(f"calibrated_score={competition_score(golden[validation], estimate[validation]):.6f}")
+        print(f"model_score={score:.6f}")
+        print(f"mape_percent={relative.mean() * 100.0:.6f}")
+        print("ape_percentiles=" + ",".join(
+            f"{value * 100.0:.4f}" for value in np.quantile(
+                relative, [0.5, 0.9, 0.95, 0.99])))
     if args.output_model:
         args.output_model.parent.mkdir(parents=True, exist_ok=True)
         model.save_model(str(args.output_model), num_iteration=selected_iteration)
         print(f"model={args.output_model}")
-    if args.output_validation:
+    if args.output_validation and not args.train_all:
         args.output_validation.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             args.output_validation,
