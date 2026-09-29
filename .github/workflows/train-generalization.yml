@@ -32,7 +32,7 @@ jobs:
             --estimate build/model/baseline_no_cache_1m.csv \
             --features build/model/search_features.csv \
             --output-model build/model/generalization_model.txt \
-            --rounds 2000 \
+            --rounds 3000 \
             | tee build/model/training_report.txt
 
       - uses: actions/upload-artifact@v4
