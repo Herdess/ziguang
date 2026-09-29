@@ -1,0 +1,41 @@
+name: Train generalization model
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install training dependency
+        run: python3 -m pip install --disable-pip-version-check lightgbm
+
+      - name: Build no-cache baseline
+        working-directory: fpga-exact-astar
+        run: |
+          make clean
+          make -j2 CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra"
+          mkdir -p build/model
+          ./estimate --no-public-cache --no-repeat-accel \
+            -in data/delay_estimate_ans.csv \
+            -out build/model/baseline_no_cache_1m.csv
+
+      - name: Train architecture-aware residual model
+        working-directory: fpga-exact-astar
+        run: |
+          python3 tools/train_lightgbm_residual.py \
+            --golden data/delay_estimate_ans.csv \
+            --estimate build/model/baseline_no_cache_1m.csv \
+            --output-model build/model/generalization_model.txt \
+            | tee build/model/training_report.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generalization-model
+          path: |
+            fpga-exact-astar/build/model/generalization_model.txt
+            fpga-exact-astar/build/model/training_report.txt
+          if-no-files-found: error
+          retention-days: 30
