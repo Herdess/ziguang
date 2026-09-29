@@ -35,6 +35,8 @@ def main() -> None:
     parser.add_argument("--leaves", type=int, default=48)
     parser.add_argument("--depth", type=int, default=8)
     parser.add_argument("--min-data", type=int, default=250)
+    parser.add_argument("--base", choices=("calibrated", "raw"),
+                        default="calibrated")
     args = parser.parse_args()
 
     ports = architecture_ports(args.arch_header)
@@ -98,10 +100,28 @@ def main() -> None:
     target_family = family_by_port[target]
     source_lane = lane_by_port[source]
     target_lane = lane_by_port[target]
-    port_pair = source * len(ports) + target
-    family_pair = source_family * len(family_ids) + target_family
-    source_port_target_family = source * len(family_ids) + target_family
-    source_family_target_port = source_family * len(ports) + target
+    domain_ids = {name: index for index, name in enumerate("ZIAS")}
+    wire_ids = {name: index for index, name in enumerate("SDQL-")}
+    compass_ids = {name: index for index, name in enumerate("ENSW-")}
+    variant_ids = {name: index for index, name in enumerate("AB-")}
+    bank_ids = {name: index for index, name in enumerate("ABCDEFGH-")}
+    suffix_names = [
+        name[3:] if name[0] in "AS" else "-" for name in ordered_port_names]
+    suffix_ids = {name: index for index, name in enumerate(dict.fromkeys(suffix_names))}
+    domain_by_port = np.asarray([domain_ids[name[0]] for name in ordered_port_names])
+    wire_by_port = np.asarray([
+        wire_ids[name[1]] if name[0] in "ZI" else wire_ids["-"]
+        for name in ordered_port_names])
+    compass_by_port = np.asarray([
+        compass_ids[name[2]] if name[0] in "ZI" else compass_ids["-"]
+        for name in ordered_port_names])
+    variant_by_port = np.asarray([
+        variant_ids[name[3]] if name[0] in "ZI" and len(family_names[index]) == 4
+        else variant_ids["-"] for index, name in enumerate(ordered_port_names)])
+    bank_by_port = np.asarray([
+        bank_ids[name[2]] if name[0] in "AS" else bank_ids["-"]
+        for name in ordered_port_names])
+    suffix_by_port = np.asarray([suffix_ids[name] for name in suffix_names])
 
     source_y_mod100 = sy % 100
     target_y_mod100 = ty % 100
@@ -138,8 +158,9 @@ def main() -> None:
         "dx_mod_10", "dy_mod_12",
         "vertical_gap_mask", "horizontal_gap_mask",
         "source_family", "target_family", "source_lane", "target_lane",
-        "port_pair", "family_pair", "source_port_target_family",
-        "source_family_target_port",
+        "source_domain", "target_domain", "source_wire", "target_wire",
+        "source_compass", "target_compass", "source_variant", "target_variant",
+        "source_bank", "target_bank", "source_suffix", "target_suffix",
         "source_y_mod100", "target_y_mod100", "midpoint_y_mod100",
         "source_y_band", "target_y_band",
         "source_x_side", "target_x_side", "crosses_central_column",
@@ -157,13 +178,18 @@ def main() -> None:
         abs_dx % 10, abs_dy % 12,
         vertical_mask, horizontal_mask,
         source_family, target_family, source_lane, target_lane,
-        port_pair, family_pair, source_port_target_family,
-        source_family_target_port,
+        domain_by_port[source], domain_by_port[target],
+        wire_by_port[source], wire_by_port[target],
+        compass_by_port[source], compass_by_port[target],
+        variant_by_port[source], variant_by_port[target],
+        bank_by_port[source], bank_by_port[target],
+        suffix_by_port[source], suffix_by_port[target],
         source_y_mod100, target_y_mod100, midpoint_y_mod100,
         source_y_band, target_y_band,
         source_x_side, target_x_side, crosses_central_column,
         source_open_distance, target_open_distance,
     ]
+    base_estimate = estimate
     if args.features:
         with args.features.open(encoding="utf-8") as handle:
             search_names = ["search_" + name for name in handle.readline().strip().split(",")]
@@ -174,22 +200,33 @@ def main() -> None:
         names.extend(search_names)
         feature_columns.extend(search_features[:, index]
                                for index in range(search_features.shape[1]))
+        if args.base == "raw":
+            base_estimate = search_features[:, search_names.index("search_raw")].astype(
+                np.int32)
+            # The calibrated estimate was fitted on all public rows.  Exclude
+            # it from strict holdout runs so validation answers cannot leak
+            # through the pre-existing calibration tables.
+            names.pop(0)
+            feature_columns.pop(0)
+    elif args.base == "raw":
+        raise ValueError("--base raw requires --features")
     features = np.column_stack(feature_columns).astype(np.float32)
 
-    positive = (golden > 0) & (estimate > 0)
+    positive = (golden > 0) & (base_estimate > 0)
     fit_training = training & positive
     fit_validation = validation & positive
     target_residual = np.zeros(golden.size, dtype=np.float32)
     target_residual[positive] = np.log(
-        golden[positive] / estimate[positive]).astype(np.float32)
+        golden[positive] / base_estimate[positive]).astype(np.float32)
     categorical_names = {
         "source_port", "target_port", "direction", "block_mask",
         "source_x_zone", "source_y_zone", "target_x_zone", "target_y_zone",
         "source_zone", "target_zone", "dx_mod_10", "dy_mod_12",
         "vertical_gap_mask", "horizontal_gap_mask",
         "source_family", "target_family", "source_lane", "target_lane",
-        "port_pair", "family_pair", "source_port_target_family",
-        "source_family_target_port",
+        "source_domain", "target_domain", "source_wire", "target_wire",
+        "source_compass", "target_compass", "source_variant", "target_variant",
+        "source_bank", "target_bank", "source_suffix", "target_suffix",
         "source_y_band", "target_y_band", "source_x_side", "target_x_side",
         "crosses_central_column",
     }
@@ -237,18 +274,20 @@ def main() -> None:
     print("feature_importance=" + ",".join(
         f"{name}:{gain:.1f}" for name, gain in importance[:20]))
 
-    prediction = estimate[validation].astype(np.int64).copy()
+    prediction = base_estimate[validation].astype(np.int64).copy()
     residual = model.predict(
         features[fit_validation], num_iteration=model.best_iteration)
     prediction[positive[validation]] = np.maximum(
-        0, np.rint(estimate[fit_validation] * np.exp(residual))).astype(np.int64)
+        0, np.rint(base_estimate[fit_validation] * np.exp(residual))).astype(np.int64)
     score = competition_score(golden[validation], prediction)
     nonzero = golden[validation] > 0
     relative = (np.abs(prediction[nonzero] - golden[validation][nonzero]) /
                 golden[validation][nonzero])
     print(f"validation_fold={args.validation_fold}")
+    print(f"base={args.base}")
     print(f"best_iteration={model.best_iteration}")
-    print(f"baseline_score={competition_score(golden[validation], estimate[validation]):.6f}")
+    print(f"base_score={competition_score(golden[validation], base_estimate[validation]):.6f}")
+    print(f"calibrated_score={competition_score(golden[validation], estimate[validation]):.6f}")
     print(f"model_score={score:.6f}")
     print(f"mape_percent={relative.mean() * 100.0:.6f}")
     print("ape_percentiles=" + ",".join(
