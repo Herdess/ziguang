@@ -1,0 +1,448 @@
+#include "dijkstra.hpp"
+
+#include <algorithm>
+#include <cassert>
+#include <limits>
+#include <iterator>
+#include <stdexcept>
+#include <unordered_map>
+
+namespace srb {
+
+unsigned RadixHeap::bucket_index(uint32_t key, uint32_t last) {
+    const uint32_t difference = key ^ last;
+    return difference == 0 ? 0U : 32U - static_cast<unsigned>(__builtin_clz(difference));
+}
+
+void RadixHeap::clear() {
+    for (auto& bucket : buckets_) bucket.clear();
+    last_ = 0;
+    size_ = 0;
+}
+
+void RadixHeap::push(HeapItem item) {
+    // Required by a monotone radix heap and guaranteed by non-negative
+    // Dijkstra edge weights.
+    assert(item.distance >= last_);
+    buckets_[bucket_index(item.distance, last_)].push_back(item);
+    ++size_;
+}
+
+void RadixHeap::pull_min_bucket() {
+    if (!buckets_[0].empty()) return;
+    unsigned source_index = 1;
+    while (source_index < buckets_.size() && buckets_[source_index].empty()) ++source_index;
+    assert(source_index < buckets_.size());
+
+    const auto& source = buckets_[source_index];
+    last_ = std::min_element(
+        source.begin(), source.end(),
+        [](const HeapItem& a, const HeapItem& b) { return a.distance < b.distance; })
+        ->distance;
+
+    // Once last_ becomes the minimum key in this bucket, every redistributed
+    // item moves to a strictly lower-index bucket. Therefore appending to the
+    // destinations cannot invalidate iteration over the source bucket.
+    for (const HeapItem& item : source) {
+        const unsigned destination = bucket_index(item.distance, last_);
+        assert(destination < source_index);
+        buckets_[destination].push_back(item);
+    }
+    buckets_[source_index].clear();
+}
+
+const HeapItem& RadixHeap::top() {
+    pull_min_bucket();
+    return buckets_[0].back();
+}
+
+HeapItem RadixHeap::pop() {
+    pull_min_bucket();
+    const HeapItem item = buckets_[0].back();
+    buckets_[0].pop_back();
+    --size_;
+    return item;
+}
+
+size_t RadixHeap::capacity_bytes() const {
+    size_t bytes = 0;
+    for (const auto& bucket : buckets_) bytes += bucket.capacity() * sizeof(HeapItem);
+    return bytes;
+}
+
+BidirectionalDijkstra::BidirectionalDijkstra(const Architecture& architecture)
+    : arch_(architecture),
+      state_count_(static_cast<size_t>(architecture.site_count()) * architecture.internal_count()),
+      forward_distance_(state_count_), backward_distance_(state_count_),
+      forward_stamp_(state_count_, 0), backward_stamp_(state_count_, 0) {
+    if (state_count_ > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("internal state count exceeds uint32_t");
+    }
+}
+
+uint32_t BidirectionalDijkstra::state_id(uint32_t site, uint16_t internal) const {
+    return site * arch_.internal_count() + internal;
+}
+
+uint32_t BidirectionalDijkstra::transition_delay(
+    const Transition& transition, DelayMode mode) const {
+    return transition.block_delay +
+           (mode == DelayMode::Exact ? transition.line_delay : 0U);
+}
+
+BidirectionalDijkstra::SearchBox BidirectionalDijkstra::make_search_box(
+    const Pin& source, const Pin& target, uint32_t margin) const {
+    const uint32_t source_x = arch_.site_x(source.site);
+    const uint32_t source_y = arch_.site_y(source.site);
+    const uint32_t target_x = arch_.site_x(target.site);
+    const uint32_t target_y = arch_.site_y(target.site);
+    const uint32_t min_x = std::min(source_x, target_x);
+    const uint32_t max_x = std::max(source_x, target_x);
+    const uint32_t min_y = std::min(source_y, target_y);
+    const uint32_t max_y = std::max(source_y, target_y);
+    const uint32_t right_limit = static_cast<uint32_t>(arch_.width() - 1);
+    const uint32_t upper_limit = static_cast<uint32_t>(arch_.height() - 1);
+    return {
+        static_cast<uint16_t>(margin > min_x ? 0 : min_x - margin),
+        static_cast<uint16_t>(margin > right_limit - max_x ? right_limit : max_x + margin),
+        static_cast<uint16_t>(margin > min_y ? 0 : min_y - margin),
+        static_cast<uint16_t>(margin > upper_limit - max_y ? upper_limit : max_y + margin),
+    };
+}
+
+bool BidirectionalDijkstra::inside_box(uint32_t site, const SearchBox& box) const {
+    const uint16_t x = arch_.site_x(site);
+    const uint16_t y = arch_.site_y(site);
+    return x >= box.left && x <= box.right && y >= box.lower && y <= box.upper;
+}
+
+uint32_t BidirectionalDijkstra::automatic_margin(const Pin& source) const {
+    const uint32_t source_x = arch_.site_x(source.site);
+    const uint32_t source_y = arch_.site_y(source.site);
+    uint32_t margin = 0;
+    auto include_site = [&](uint32_t site) {
+        const uint32_t x = arch_.site_x(site);
+        const uint32_t y = arch_.site_y(site);
+        const uint32_t dx = x > source_x ? x - source_x : source_x - x;
+        const uint32_t dy = y > source_y ? y - source_y : source_y - y;
+        margin = std::max(margin, std::max(dx, dy));
+    };
+
+    // Preserve every legal first landing generated by the source adapter.
+    // For an Output source this is its single forced Net.  For an Input or
+    // logic source it covers every Arc+Net first-hop choice.
+    for (uint16_t net : arch_.nets_from(source.port)) {
+        const Transition& transition = arch_.forward_transition(source.site, net);
+        if (transition.site != kInvalidSite) include_site(transition.site);
+    }
+    for (const ArcEdge& arc : arch_.arcs_from(source.port)) {
+        for (uint16_t net : arch_.nets_from(arc.port)) {
+            const Transition& transition = arch_.forward_transition(source.site, net);
+            if (transition.site != kInvalidSite) include_site(transition.site);
+        }
+    }
+    return margin;
+}
+
+uint32_t BidirectionalDijkstra::shortest(
+    const Pin& source, const Pin& target, DelayMode mode,
+    MarginConfig margin, QueryStats& stats, std::vector<Pin>* path) {
+    if (margin.mode == MarginMode::Disabled) {
+        const SearchBox unused{};
+        return shortest_impl<false>(source, target, mode, unused, stats, path);
+    }
+    const uint32_t effective_margin = margin.mode == MarginMode::Auto
+        ? automatic_margin(source)
+        : margin.value;
+    ++stats.bounded_queries;
+    stats.effective_margin_sum += effective_margin;
+    stats.effective_margin_max = std::max(stats.effective_margin_max, effective_margin);
+    const SearchBox box = make_search_box(source, target, effective_margin);
+    return shortest_impl<true>(source, target, mode, box, stats, path);
+}
+
+template <bool Bounded>
+uint32_t BidirectionalDijkstra::shortest_impl(
+    const Pin& source, const Pin& target, DelayMode mode,
+    const SearchBox& box, QueryStats& stats, std::vector<Pin>* path) {
+    next_epoch();
+    forward_heap_.clear();
+    backward_heap_.clear();
+    uint32_t best = kInfinity;
+    uint32_t meeting = kInvalidSite;
+    std::vector<Pin> direct_path;
+    std::unordered_map<uint32_t, std::vector<Pin>> forward_seeds;
+    std::unordered_map<uint32_t, std::vector<Pin>> backward_seeds;
+    if (path != nullptr && forward_parent_.empty()) {
+        forward_parent_.resize(state_count_);
+        backward_next_.resize(state_count_);
+        forward_parent_net_.resize(state_count_);
+        backward_next_net_.resize(state_count_);
+    }
+
+    if (source.site == target.site && source.port == target.port) {
+        best = 0;
+        if (path != nullptr) direct_path = {source};
+    }
+    if (source.site == target.site) {
+        for (const ArcEdge& edge : arch_.arcs_from(source.port)) {
+            if (edge.port == target.port && edge.delay < best) {
+                best = edge.delay;
+                if (path != nullptr) direct_path = {source, target};
+            }
+        }
+    }
+
+    auto update_best = [&](uint32_t candidate, uint32_t state) {
+        if (candidate < best) {
+            best = candidate;
+            meeting = state;
+            direct_path.clear();
+        }
+    };
+    auto seed_forward = [&](uint32_t site, uint16_t internal, uint32_t distance,
+                            std::vector<Pin> seed_path) {
+        const uint32_t state = state_id(site, internal);
+        if (set_forward(state, distance)) {
+            forward_heap_.push({distance, state});
+            if (path != nullptr) {
+                forward_parent_[state] = kInvalidSite;
+                forward_seeds[state] = std::move(seed_path);
+            }
+        }
+        if (has_backward(state)) {
+            update_best(forward_distance_[state] + backward_distance_[state], state);
+        }
+    };
+    auto seed_backward = [&](uint32_t site, uint16_t internal, uint32_t distance,
+                             std::vector<Pin> seed_path) {
+        const uint32_t state = state_id(site, internal);
+        if (set_backward(state, distance)) {
+            backward_heap_.push({distance, state});
+            if (path != nullptr) {
+                backward_next_[state] = kInvalidSite;
+                backward_seeds[state] = std::move(seed_path);
+            }
+        }
+        if (has_forward(state)) {
+            update_best(forward_distance_[state] + backward_distance_[state], state);
+        }
+    };
+
+    const int16_t source_internal = arch_.internal_index(source.port);
+    if (source_internal >= 0) {
+        seed_forward(source.site, static_cast<uint16_t>(source_internal), 0, {source});
+    }
+
+    for (uint16_t net : arch_.nets_from(source.port)) {
+        const Transition& transition = arch_.forward_transition(source.site, net);
+        if (transition.site == kInvalidSite) continue;
+        if constexpr (Bounded) {
+            if (!inside_box(transition.site, box)) continue;
+        }
+        const int16_t next_internal = arch_.internal_index_for_net_destination(net);
+        const Pin destination{transition.site, arch_.net_rule(net).to_port};
+        seed_forward(transition.site, static_cast<uint16_t>(next_internal),
+                     transition_delay(transition, mode), {source, destination});
+    }
+    for (const ArcEdge& arc : arch_.arcs_from(source.port)) {
+        for (uint16_t net : arch_.nets_from(arc.port)) {
+            const Transition& transition = arch_.forward_transition(source.site, net);
+            if (transition.site == kInvalidSite) continue;
+            if constexpr (Bounded) {
+                if (!inside_box(transition.site, box)) continue;
+            }
+            const int16_t next_internal = arch_.internal_index_for_net_destination(net);
+            const Pin arc_pin{source.site, arc.port};
+            const Pin destination{transition.site, arch_.net_rule(net).to_port};
+            seed_forward(transition.site, static_cast<uint16_t>(next_internal),
+                         static_cast<uint32_t>(arc.delay) + transition_delay(transition, mode),
+                         {source, arc_pin, destination});
+        }
+    }
+
+    const int16_t target_internal = arch_.internal_index(target.port);
+    if (target_internal >= 0) {
+        seed_backward(target.site, static_cast<uint16_t>(target_internal), 0, {target});
+    }
+    for (const ArcEdge& arc : arch_.arcs_to(target.port)) {
+        const int16_t previous_internal = arch_.internal_index(arc.port);
+        if (previous_internal >= 0) {
+            const Pin previous{target.site, arc.port};
+            seed_backward(target.site, static_cast<uint16_t>(previous_internal), arc.delay,
+                          {previous, target});
+        }
+    }
+
+    while (true) {
+        discard_stale_forward();
+        discard_stale_backward();
+        if (forward_heap_.empty() || backward_heap_.empty()) break;
+        if (static_cast<uint64_t>(forward_heap_.top().distance) + backward_heap_.top().distance >= best) break;
+
+        if (forward_heap_.top().distance <= backward_heap_.top().distance) {
+            const HeapItem item = forward_heap_.pop();
+            ++stats.settled_forward;
+            const uint32_t site = item.state / arch_.internal_count();
+            const uint16_t internal = static_cast<uint16_t>(item.state % arch_.internal_count());
+            for (const MacroEdge& edge : arch_.macros_from(internal)) {
+                const Transition& transition = arch_.forward_transition(site, edge.net);
+                if (transition.site == kInvalidSite) continue;
+                if constexpr (Bounded) {
+                    if (!inside_box(transition.site, box)) continue;
+                }
+                const uint32_t next = state_id(transition.site, edge.internal);
+                const uint32_t candidate = item.distance + edge.arc_delay + transition_delay(transition, mode);
+                if (candidate < best) {
+                    if (set_forward(next, candidate)) {
+                        forward_heap_.push({candidate, next});
+                        if (path != nullptr) {
+                            forward_parent_[next] = item.state;
+                            forward_parent_net_[next] = edge.net;
+                        }
+                        ++stats.relaxed;
+                    }
+                    if (has_forward(next) && has_backward(next)) {
+                        update_best(forward_distance_[next] + backward_distance_[next], next);
+                    }
+                }
+            }
+        } else {
+            const HeapItem item = backward_heap_.pop();
+            ++stats.settled_backward;
+            const uint32_t site = item.state / arch_.internal_count();
+            const uint16_t internal = static_cast<uint16_t>(item.state % arch_.internal_count());
+            for (const MacroEdge& edge : arch_.macros_to(internal)) {
+                const Transition& transition = arch_.reverse_transition(site, edge.net);
+                if (transition.site == kInvalidSite) continue;
+                if constexpr (Bounded) {
+                    if (!inside_box(transition.site, box)) continue;
+                }
+                const uint32_t previous = state_id(transition.site, edge.internal);
+                const uint32_t candidate = item.distance + edge.arc_delay + transition_delay(transition, mode);
+                if (candidate < best) {
+                    if (set_backward(previous, candidate)) {
+                        backward_heap_.push({candidate, previous});
+                        if (path != nullptr) {
+                            backward_next_[previous] = item.state;
+                            backward_next_net_[previous] = edge.net;
+                        }
+                        ++stats.relaxed;
+                    }
+                    if (has_forward(previous) && has_backward(previous)) {
+                        update_best(forward_distance_[previous] + backward_distance_[previous], previous);
+                    }
+                }
+            }
+        }
+    }
+
+    if (best != kInfinity && mode == DelayMode::RelativeGapEstimate) {
+        best += arch_.relative_line_delay(source.site, target.site);
+    }
+    if (path != nullptr) {
+        path->clear();
+        if (best == kInfinity) return best;
+        if (meeting == kInvalidSite) {
+            *path = std::move(direct_path);
+            return best;
+        }
+        auto state_pin = [&](uint32_t state) {
+            const uint32_t site = state / arch_.internal_count();
+            const uint16_t internal = static_cast<uint16_t>(state % arch_.internal_count());
+            return Pin{site, arch_.internal_port(internal)};
+        };
+        std::vector<uint32_t> chain;
+        for (uint32_t state = meeting;; state = forward_parent_[state]) {
+            chain.push_back(state);
+            if (forward_parent_[state] == kInvalidSite) break;
+        }
+        std::reverse(chain.begin(), chain.end());
+        const auto forward_seed = forward_seeds.find(chain.front());
+        if (forward_seed == forward_seeds.end()) throw std::runtime_error("missing forward path seed");
+        *path = forward_seed->second;
+        for (size_t i = 1; i < chain.size(); ++i) {
+            const uint32_t previous = chain[i - 1];
+            const uint32_t previous_site = previous / arch_.internal_count();
+            const NetRule& net = arch_.net_rule(forward_parent_net_[chain[i]]);
+            path->push_back({previous_site, net.from_port});
+            path->push_back(state_pin(chain[i]));
+        }
+        uint32_t state = meeting;
+        while (backward_next_[state] != kInvalidSite) {
+            const uint32_t site = state / arch_.internal_count();
+            const NetRule& net = arch_.net_rule(backward_next_net_[state]);
+            path->push_back({site, net.from_port});
+            state = backward_next_[state];
+            path->push_back(state_pin(state));
+        }
+        const auto backward_seed = backward_seeds.find(state);
+        if (backward_seed == backward_seeds.end()) throw std::runtime_error("missing backward path seed");
+        path->insert(path->end(), std::next(backward_seed->second.begin()), backward_seed->second.end());
+    }
+    return best;
+}
+
+size_t BidirectionalDijkstra::workspace_bytes() const {
+    return 2 * forward_distance_.capacity() * sizeof(uint32_t) +
+           2 * forward_stamp_.capacity() * sizeof(uint16_t) +
+           forward_parent_.capacity() * sizeof(uint32_t) +
+           backward_next_.capacity() * sizeof(uint32_t) +
+           forward_parent_net_.capacity() * sizeof(uint16_t) +
+           backward_next_net_.capacity() * sizeof(uint16_t) +
+           forward_heap_.capacity_bytes() + backward_heap_.capacity_bytes();
+}
+
+void BidirectionalDijkstra::next_epoch() {
+    ++epoch_;
+    if (epoch_ == 0) {
+        std::fill(forward_stamp_.begin(), forward_stamp_.end(), 0);
+        std::fill(backward_stamp_.begin(), backward_stamp_.end(), 0);
+        epoch_ = 1;
+    }
+}
+
+bool BidirectionalDijkstra::has_forward(uint32_t state) const {
+    return forward_stamp_[state] == epoch_;
+}
+
+bool BidirectionalDijkstra::has_backward(uint32_t state) const {
+    return backward_stamp_[state] == epoch_;
+}
+
+bool BidirectionalDijkstra::set_forward(uint32_t state, uint32_t distance) {
+    if (!has_forward(state) || distance < forward_distance_[state]) {
+        forward_stamp_[state] = epoch_;
+        forward_distance_[state] = distance;
+        return true;
+    }
+    return false;
+}
+
+bool BidirectionalDijkstra::set_backward(uint32_t state, uint32_t distance) {
+    if (!has_backward(state) || distance < backward_distance_[state]) {
+        backward_stamp_[state] = epoch_;
+        backward_distance_[state] = distance;
+        return true;
+    }
+    return false;
+}
+
+void BidirectionalDijkstra::discard_stale_forward() {
+    while (!forward_heap_.empty()) {
+        const HeapItem& item = forward_heap_.top();
+        if (has_forward(item.state) && forward_distance_[item.state] == item.distance) break;
+        forward_heap_.pop();
+    }
+}
+
+void BidirectionalDijkstra::discard_stale_backward() {
+    while (!backward_heap_.empty()) {
+        const HeapItem& item = backward_heap_.top();
+        if (has_backward(item.state) && backward_distance_[item.state] == item.distance) break;
+        backward_heap_.pop();
+    }
+}
+
+}  // namespace srb
+

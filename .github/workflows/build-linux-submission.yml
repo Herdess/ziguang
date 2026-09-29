@@ -1,0 +1,50 @@
+name: Build Linux submission
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build static Linux estimate
+        working-directory: fpga-exact-astar
+        run: |
+          make clean
+          make -j2 \
+            CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra" \
+            LDFLAGS="-static -static-libgcc -static-libstdc++"
+          strip --strip-all estimate
+          chmod 755 estimate
+          ls -lh estimate
+          file estimate
+          if ldd estimate 2>&1 | grep -qv "not a dynamic executable"; then
+            echo "estimate is not fully static"
+            exit 1
+          fi
+
+      - name: Verify official CLI and Exact oracle
+        working-directory: fpga-exact-astar
+        run: |
+          mkdir -p build
+          ./estimate -in examples/delay_estimate_request.csv -out build/default_result.csv
+          ./estimate --solver verify -in examples/delay_estimate_request.csv -out build/verify_result.csv
+          diff -u examples/delay_estimate_result.expected.csv build/verify_result.csv
+
+      - name: Assemble submission
+        working-directory: fpga-exact-astar
+        run: |
+          mkdir -p submission/bin
+          install -m 755 estimate submission/bin/estimate
+          (cd submission && zip -9 -r ../submission.zip bin)
+          unzip -l submission.zip
+          sha256sum estimate submission.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ziguang-submission
+          path: fpga-exact-astar/submission.zip
+          if-no-files-found: error
+          retention-days: 30
