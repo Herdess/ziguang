@@ -32,6 +32,9 @@ def main() -> None:
     parser.add_argument("--output-model", type=Path, required=True)
     parser.add_argument("--validation-fold", type=int, default=0)
     parser.add_argument("--rounds", type=int, default=1200)
+    parser.add_argument("--leaves", type=int, default=48)
+    parser.add_argument("--depth", type=int, default=8)
+    parser.add_argument("--min-data", type=int, default=250)
     args = parser.parse_args()
 
     ports = architecture_ports(args.arch_header)
@@ -95,6 +98,10 @@ def main() -> None:
     target_family = family_by_port[target]
     source_lane = lane_by_port[source]
     target_lane = lane_by_port[target]
+    port_pair = source * len(ports) + target
+    family_pair = source_family * len(family_ids) + target_family
+    source_port_target_family = source * len(family_ids) + target_family
+    source_family_target_port = source_family * len(ports) + target
 
     source_y_mod100 = sy % 100
     target_y_mod100 = ty % 100
@@ -131,6 +138,8 @@ def main() -> None:
         "dx_mod_10", "dy_mod_12",
         "vertical_gap_mask", "horizontal_gap_mask",
         "source_family", "target_family", "source_lane", "target_lane",
+        "port_pair", "family_pair", "source_port_target_family",
+        "source_family_target_port",
         "source_y_mod100", "target_y_mod100", "midpoint_y_mod100",
         "source_y_band", "target_y_band",
         "source_x_side", "target_x_side", "crosses_central_column",
@@ -148,6 +157,8 @@ def main() -> None:
         abs_dx % 10, abs_dy % 12,
         vertical_mask, horizontal_mask,
         source_family, target_family, source_lane, target_lane,
+        port_pair, family_pair, source_port_target_family,
+        source_family_target_port,
         source_y_mod100, target_y_mod100, midpoint_y_mod100,
         source_y_band, target_y_band,
         source_x_side, target_x_side, crosses_central_column,
@@ -177,6 +188,8 @@ def main() -> None:
         "source_zone", "target_zone", "dx_mod_10", "dy_mod_12",
         "vertical_gap_mask", "horizontal_gap_mask",
         "source_family", "target_family", "source_lane", "target_lane",
+        "port_pair", "family_pair", "source_port_target_family",
+        "source_family_target_port",
         "source_y_band", "target_y_band", "source_x_side", "target_x_side",
         "crosses_central_column",
     }
@@ -194,14 +207,17 @@ def main() -> None:
         "objective": "regression_l1",
         "metric": "l1",
         "learning_rate": 0.035,
-        "num_leaves": 48,
-        "max_depth": 8,
-        "min_data_in_leaf": 250,
+        "num_leaves": args.leaves,
+        "max_depth": args.depth,
+        "min_data_in_leaf": args.min_data,
         "feature_fraction": 0.85,
         "bagging_fraction": 0.85,
         "bagging_freq": 1,
         "lambda_l1": 0.02,
         "lambda_l2": 2.0,
+        "cat_l2": 10.0,
+        "cat_smooth": 20.0,
+        "max_cat_threshold": 64,
         "max_bin": 127,
         "num_threads": 2,
         "seed": 20260929,
