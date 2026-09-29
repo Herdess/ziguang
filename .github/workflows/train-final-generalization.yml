@@ -1,0 +1,53 @@
+name: Train final all-data generalization model
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install training dependency
+        run: python3 -m pip install --disable-pip-version-check lightgbm
+
+      - name: Build strict no-cache features
+        working-directory: fpga-exact-astar
+        run: |
+          make clean
+          make -j2 CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra"
+          mkdir -p build/final-generalization
+          ./estimate --no-public-cache --no-repeat-accel \
+            --feature-output build/final-generalization/features.csv \
+            -in data/delay_estimate_ans.csv \
+            -out build/final-generalization/baseline.csv
+
+      - name: Train on every public Golden row
+        working-directory: fpga-exact-astar
+        run: |
+          set -o pipefail
+          python3 tools/train_lightgbm_residual.py \
+            --golden data/delay_estimate_ans.csv \
+            --estimate build/final-generalization/baseline.csv \
+            --features build/final-generalization/features.csv \
+            --base raw \
+            --train-all \
+            --seed 20260929 \
+            --objective huber \
+            --learning-rate 0.05 \
+            --output-model build/final-generalization/model.txt \
+            --rounds 2600 \
+            --leaves 64 \
+            --depth 9 \
+            --min-data 200 \
+            | tee build/final-generalization/report.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-generalization-model
+          path: |
+            fpga-exact-astar/build/final-generalization/model.txt
+            fpga-exact-astar/build/final-generalization/report.txt
+          if-no-files-found: error
+          retention-days: 30
