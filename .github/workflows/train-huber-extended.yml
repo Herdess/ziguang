@@ -1,0 +1,53 @@
+name: Train extended Huber model
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install training dependency
+        run: python3 -m pip install --disable-pip-version-check lightgbm
+
+      - name: Build strict no-cache features
+        working-directory: fpga-exact-astar
+        run: |
+          make clean
+          make -j2 CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra"
+          mkdir -p build/huber-extended
+          ./estimate --no-public-cache --no-repeat-accel \
+            --feature-output build/huber-extended/search_features.csv \
+            -in data/delay_estimate_ans.csv \
+            -out build/huber-extended/baseline_no_cache_1m.csv
+
+      - name: Train extended Huber residual model
+        working-directory: fpga-exact-astar
+        run: |
+          set -o pipefail
+          python3 tools/train_lightgbm_residual.py \
+            --golden data/delay_estimate_ans.csv \
+            --estimate build/huber-extended/baseline_no_cache_1m.csv \
+            --features build/huber-extended/search_features.csv \
+            --base raw \
+            --seed 20260929 \
+            --objective huber \
+            --output-model build/huber-extended/generalization_model.txt \
+            --output-validation build/huber-extended/validation_predictions.npz \
+            --rounds 4000 \
+            --leaves 48 \
+            --depth 8 \
+            --min-data 250 \
+            | tee build/huber-extended/training_report.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: huber-extended-model
+          path: |
+            fpga-exact-astar/build/huber-extended/generalization_model.txt
+            fpga-exact-astar/build/huber-extended/training_report.txt
+            fpga-exact-astar/build/huber-extended/validation_predictions.npz
+          if-no-files-found: error
+          retention-days: 30
