@@ -1,0 +1,67 @@
+name: Train compact Huber models
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: balanced
+            learning_rate: 0.05
+            rounds: 2800
+          - name: fast
+            learning_rate: 0.075
+            rounds: 1900
+          - name: ultra
+            learning_rate: 0.10
+            rounds: 1500
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install training dependency
+        run: python3 -m pip install --disable-pip-version-check lightgbm
+
+      - name: Build strict no-cache features
+        working-directory: fpga-exact-astar
+        run: |
+          make clean
+          make -j2 CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra"
+          mkdir -p build/huber-${{ matrix.name }}
+          ./estimate --no-public-cache --no-repeat-accel \
+            --feature-output build/huber-${{ matrix.name }}/search_features.csv \
+            -in data/delay_estimate_ans.csv \
+            -out build/huber-${{ matrix.name }}/baseline.csv
+
+      - name: Train compact Huber model
+        working-directory: fpga-exact-astar
+        run: |
+          set -o pipefail
+          python3 tools/train_lightgbm_residual.py \
+            --golden data/delay_estimate_ans.csv \
+            --estimate build/huber-${{ matrix.name }}/baseline.csv \
+            --features build/huber-${{ matrix.name }}/search_features.csv \
+            --base raw \
+            --seed 20260929 \
+            --objective huber \
+            --learning-rate ${{ matrix.learning_rate }} \
+            --output-model build/huber-${{ matrix.name }}/model.txt \
+            --output-validation build/huber-${{ matrix.name }}/validation.npz \
+            --rounds ${{ matrix.rounds }} \
+            --leaves 48 \
+            --depth 8 \
+            --min-data 250 \
+            | tee build/huber-${{ matrix.name }}/report.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compact-huber-${{ matrix.name }}
+          path: |
+            fpga-exact-astar/build/huber-${{ matrix.name }}/model.txt
+            fpga-exact-astar/build/huber-${{ matrix.name }}/report.txt
+            fpga-exact-astar/build/huber-${{ matrix.name }}/validation.npz
+          if-no-files-found: error
+          retention-days: 30
