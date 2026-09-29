@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from pathlib import Path
 
 import lightgbm as lgb
@@ -49,9 +50,14 @@ def main() -> None:
     parser.add_argument("--arch-header", type=Path,
                         default=Path("fast_src/generated_arch_data.hpp"))
     parser.add_argument("--gap", type=Path, default=Path("arch/SRB_Gap.json"))
-    parser.add_argument("--output-model", type=Path, required=True)
+    parser.add_argument("--output-model", type=Path)
+    parser.add_argument("--input-model", type=Path,
+                        help="load an existing model instead of training")
+    parser.add_argument("--checkpoints", default="",
+                        help="comma-separated tree counts to evaluate")
     parser.add_argument("--validation-fold", type=int, default=0)
     parser.add_argument("--rounds", type=int, default=1200)
+    parser.add_argument("--learning-rate", type=float, default=0.035)
     parser.add_argument("--leaves", type=int, default=48)
     parser.add_argument("--depth", type=int, default=8)
     parser.add_argument("--min-data", type=int, default=250)
@@ -65,6 +71,8 @@ def main() -> None:
     parser.add_argument("--base", choices=("calibrated", "raw"),
                         default="calibrated")
     args = parser.parse_args()
+    if not args.input_model and not args.output_model:
+        parser.error("training requires --output-model")
 
     ports = architecture_ports(args.arch_header)
     golden, estimate, sx, sy, tx, ty, source, target = load_rows(
@@ -282,51 +290,56 @@ def main() -> None:
     categorical = [index for index, name in enumerate(names)
                    if name in categorical_names]
 
-    train_set = lgb.Dataset(
-        features[fit_training], label=target_residual[fit_training],
-        feature_name=names, categorical_feature=categorical, free_raw_data=False)
-    validation_set = lgb.Dataset(
-        features[fit_validation], label=target_residual[fit_validation],
-        feature_name=names, categorical_feature=categorical,
-        reference=train_set, free_raw_data=False)
-    objectives = {
-        "l1": "regression_l1",
-        "huber": "huber",
-        "fair": "fair",
-    }
-    params = {
-        "objective": objectives[args.objective],
-        "metric": "l1",
-        "learning_rate": 0.035,
-        "num_leaves": args.leaves,
-        "max_depth": args.depth,
-        "min_data_in_leaf": args.min_data,
-        "feature_fraction": 0.85,
-        "bagging_fraction": 0.85,
-        "bagging_freq": 1,
-        "lambda_l1": 0.02,
-        "lambda_l2": 2.0,
-        "cat_l2": 10.0,
-        "cat_smooth": 20.0,
-        "max_cat_threshold": 64,
-        "max_bin": 127,
-        "num_threads": 2,
-        "seed": args.seed,
-        "feature_fraction_seed": args.seed,
-        "bagging_seed": args.seed,
-        "verbosity": -1,
-        "force_col_wise": True,
-    }
-    if args.objective == "huber":
-        params["alpha"] = 0.85
-    elif args.objective == "fair":
-        # Residuals are logarithmic relative errors and are usually only a
-        # few hundredths, so the default fair_c=1 would behave almost like L2.
-        params["fair_c"] = 0.02
-    model = lgb.train(
-        params, train_set, num_boost_round=args.rounds,
-        valid_sets=[validation_set], valid_names=["validation"],
-        callbacks=[lgb.early_stopping(80), lgb.log_evaluation(50)])
+    if args.input_model:
+        model = lgb.Booster(model_file=str(args.input_model))
+        selected_iteration = model.current_iteration()
+    else:
+        train_set = lgb.Dataset(
+            features[fit_training], label=target_residual[fit_training],
+            feature_name=names, categorical_feature=categorical, free_raw_data=False)
+        validation_set = lgb.Dataset(
+            features[fit_validation], label=target_residual[fit_validation],
+            feature_name=names, categorical_feature=categorical,
+            reference=train_set, free_raw_data=False)
+        objectives = {
+            "l1": "regression_l1",
+            "huber": "huber",
+            "fair": "fair",
+        }
+        params = {
+            "objective": objectives[args.objective],
+            "metric": "l1",
+            "learning_rate": args.learning_rate,
+            "num_leaves": args.leaves,
+            "max_depth": args.depth,
+            "min_data_in_leaf": args.min_data,
+            "feature_fraction": 0.85,
+            "bagging_fraction": 0.85,
+            "bagging_freq": 1,
+            "lambda_l1": 0.02,
+            "lambda_l2": 2.0,
+            "cat_l2": 10.0,
+            "cat_smooth": 20.0,
+            "max_cat_threshold": 64,
+            "max_bin": 127,
+            "num_threads": 2,
+            "seed": args.seed,
+            "feature_fraction_seed": args.seed,
+            "bagging_seed": args.seed,
+            "verbosity": -1,
+            "force_col_wise": True,
+        }
+        if args.objective == "huber":
+            params["alpha"] = 0.85
+        elif args.objective == "fair":
+            # Residuals are logarithmic relative errors and are usually only a
+            # few hundredths, so fair_c=1 would behave almost like L2.
+            params["fair_c"] = 0.02
+        model = lgb.train(
+            params, train_set, num_boost_round=args.rounds,
+            valid_sets=[validation_set], valid_names=["validation"],
+            callbacks=[lgb.early_stopping(80), lgb.log_evaluation(50)])
+        selected_iteration = model.best_iteration
 
     importance = sorted(
         zip(names, model.feature_importance(importance_type="gain")),
@@ -334,11 +347,24 @@ def main() -> None:
     print("feature_importance=" + ",".join(
         f"{name}:{gain:.1f}" for name, gain in importance[:20]))
 
-    prediction = base_estimate[validation].astype(np.int64).copy()
-    residual = model.predict(
-        features[fit_validation], num_iteration=model.best_iteration)
-    prediction[positive[validation]] = np.maximum(
-        0, np.rint(base_estimate[fit_validation] * np.exp(residual))).astype(np.int64)
+    def predict_validation(iteration: int) -> tuple[np.ndarray, float]:
+        started = time.perf_counter()
+        prediction_at_iteration = base_estimate[validation].astype(np.int64).copy()
+        residual = model.predict(
+            features[fit_validation], num_iteration=iteration)
+        prediction_at_iteration[positive[validation]] = np.maximum(
+            0, np.rint(base_estimate[fit_validation] * np.exp(residual))).astype(np.int64)
+        return prediction_at_iteration, time.perf_counter() - started
+
+    for checkpoint in (int(value) for value in args.checkpoints.split(",") if value):
+        if checkpoint <= 0 or checkpoint > model.current_iteration():
+            raise ValueError(f"invalid checkpoint {checkpoint}")
+        checkpoint_prediction, checkpoint_seconds = predict_validation(checkpoint)
+        print(f"checkpoint={checkpoint} "
+              f"score={competition_score(golden[validation], checkpoint_prediction):.6f} "
+              f"predict_seconds={checkpoint_seconds:.6f}")
+
+    prediction, prediction_seconds = predict_validation(selected_iteration)
     score = competition_score(golden[validation], prediction)
     nonzero = golden[validation] > 0
     relative = (np.abs(prediction[nonzero] - golden[validation][nonzero]) /
@@ -348,16 +374,19 @@ def main() -> None:
     print(f"seed={args.seed}")
     print(f"target_encoding={args.target_encoding}")
     print(f"objective={args.objective}")
-    print(f"best_iteration={model.best_iteration}")
+    print(f"learning_rate={args.learning_rate}")
+    print(f"best_iteration={selected_iteration}")
+    print(f"validation_predict_seconds={prediction_seconds:.6f}")
     print(f"base_score={competition_score(golden[validation], base_estimate[validation]):.6f}")
     print(f"calibrated_score={competition_score(golden[validation], estimate[validation]):.6f}")
     print(f"model_score={score:.6f}")
     print(f"mape_percent={relative.mean() * 100.0:.6f}")
     print("ape_percentiles=" + ",".join(
         f"{value * 100.0:.4f}" for value in np.quantile(relative, [0.5, 0.9, 0.95, 0.99])))
-    args.output_model.parent.mkdir(parents=True, exist_ok=True)
-    model.save_model(str(args.output_model), num_iteration=model.best_iteration)
-    print(f"model={args.output_model}")
+    if args.output_model:
+        args.output_model.parent.mkdir(parents=True, exist_ok=True)
+        model.save_model(str(args.output_model), num_iteration=selected_iteration)
+        print(f"model={args.output_model}")
     if args.output_validation:
         args.output_validation.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
