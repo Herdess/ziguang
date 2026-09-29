@@ -56,6 +56,16 @@ def main() -> None:
     parser.add_argument("--checkpoints", default="",
                         help="comma-separated tree counts to evaluate")
     parser.add_argument("--validation-fold", type=int, default=0)
+    parser.add_argument(
+        "--validation-mode", choices=("query", "template", "official"),
+        default="query",
+        help=("query hashes complete From/To pairs; template keeps identical "
+              "(source port, target port, dx, dy) groups together; official "
+              "holds out the leading --official-rows rows"))
+    parser.add_argument("--official-rows", type=int, default=1_000_000)
+    parser.add_argument(
+        "--training-sample-rate", type=float, default=1.0,
+        help="deterministically retain this fraction of training rows")
     parser.add_argument("--train-all", action="store_true",
                         help="fit the final model on every positive Golden row")
     parser.add_argument("--rounds", type=int, default=1200)
@@ -83,12 +93,6 @@ def main() -> None:
     ports = architecture_ports(args.arch_header)
     golden, estimate, sx, sy, tx, ty, source, target = load_rows(
         args.golden, args.estimate, ports)
-    fold = deterministic_fold(args.golden, 5)
-    validation = fold == args.validation_fold
-    training = ~validation
-    if args.train_all:
-        training = np.ones_like(validation, dtype=bool)
-
     dx = tx - sx
     dy = ty - sy
     abs_dx = np.abs(dx)
@@ -96,6 +100,45 @@ def main() -> None:
     sign = (np.sign(dx) + 1) * 3 + np.sign(dy) + 1
     midpoint_x = (sx + tx) // 2
     midpoint_y = (sy + ty) // 2
+
+    def mix64(values: np.ndarray) -> np.ndarray:
+        values = values.astype(np.uint64, copy=True)
+        values ^= values >> np.uint64(30)
+        values *= np.uint64(0xBF58476D1CE4E5B9)
+        values ^= values >> np.uint64(27)
+        values *= np.uint64(0x94D049BB133111EB)
+        return values ^ (values >> np.uint64(31))
+
+    if args.validation_mode == "query":
+        fold = deterministic_fold(args.golden, 5)
+        validation = fold == args.validation_fold
+    elif args.validation_mode == "template":
+        # All translated placements with the same ports and displacement must
+        # remain in one fold.  Otherwise the generated translations leak their
+        # template identity into a nominally held-out validation row.
+        template_key = (
+            source.astype(np.uint64) |
+            (target.astype(np.uint64) << np.uint64(9)) |
+            ((dx + 119).astype(np.uint64) << np.uint64(18)) |
+            ((dy + 549).astype(np.uint64) << np.uint64(26)))
+        fold = (mix64(template_key) % np.uint64(5)).astype(np.uint8)
+        validation = fold == args.validation_fold
+    else:
+        if not 0 < args.official_rows < golden.size:
+            raise ValueError("--official-rows must split the input data")
+        validation = np.arange(golden.size) < args.official_rows
+    training = ~validation
+    if args.train_all:
+        training = np.ones_like(validation, dtype=bool)
+        validation = np.zeros_like(validation, dtype=bool)
+    if not 0.0 < args.training_sample_rate <= 1.0:
+        raise ValueError("--training-sample-rate must be in (0, 1]")
+    if args.training_sample_rate < 1.0:
+        row_hash = mix64(np.arange(golden.size, dtype=np.uint64) +
+                         np.uint64(args.seed))
+        threshold = np.uint64(args.training_sample_rate * (1 << 53))
+        sampled = (row_hash >> np.uint64(11)) < threshold
+        training &= sampled
 
     gap = json.loads(args.gap.read_text(encoding="utf-8"))["Gap"]
     vertical = [line for line in gap["Line"] if line["direction"] == "vertical"]
@@ -231,6 +274,19 @@ def main() -> None:
         source_x_side, target_x_side, crosses_central_column,
         source_open_distance, target_open_distance,
     ]
+    # A combined bit mask is compact, but LightGBM's categorical split limits
+    # make rare combinations hard to learn.  Expose every physical boundary
+    # independently as well so a tree can ask whether one specific Gap/Block
+    # is crossed without first memorizing the complete mask value.
+    for index in range(len(vertical_sites)):
+        names.append(f"cross_vertical_gap_{index}")
+        feature_columns.append((vertical_mask >> index) & 1)
+    for index in range(len(horizontal_sites)):
+        names.append(f"cross_horizontal_gap_{index}")
+        feature_columns.append((horizontal_mask >> index) & 1)
+    for index in range(len(gap["Block"])):
+        names.append(f"intersects_block_{index}")
+        feature_columns.append((blocks >> index) & 1)
     base_estimate = estimate
     if args.features:
         with args.features.open(encoding="utf-8") as handle:
@@ -381,6 +437,10 @@ def main() -> None:
         return prediction_at_iteration, time.perf_counter() - started
 
     print(f"base={args.base}")
+    print(f"validation_mode={args.validation_mode}")
+    print(f"training_sample_rate={args.training_sample_rate}")
+    print(f"training_rows={fit_training.sum()}")
+    print(f"validation_rows={fit_validation.sum()}")
     print(f"seed={args.seed}")
     print(f"target_encoding={args.target_encoding}")
     print(f"objective={args.objective}")
@@ -390,7 +450,7 @@ def main() -> None:
     if args.train_all:
         if args.checkpoints or args.output_validation:
             raise ValueError("checkpoint scoring requires a held-out validation fold")
-        print(f"training_rows={fit_training.sum()}")
+        print(f"final_training_rows={fit_training.sum()}")
     else:
         for checkpoint in (int(value) for value in args.checkpoints.split(",") if value):
             if checkpoint <= 0 or checkpoint > model.current_iteration():

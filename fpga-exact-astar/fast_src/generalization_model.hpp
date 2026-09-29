@@ -13,7 +13,7 @@
 
 namespace srb {
 
-inline constexpr size_t kGeneralizationFeatureCount = 79;
+inline constexpr size_t kGeneralizationFeatureCount = 105;
 using GeneralizationFeatureArray = std::array<int32_t, kGeneralizationFeatureCount>;
 
 class GeneralizationFeatures {

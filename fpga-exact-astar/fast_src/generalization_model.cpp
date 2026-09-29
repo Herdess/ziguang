@@ -203,6 +203,15 @@ GeneralizationFeatureArray GeneralizationFeatures::build(
     add(sy / 50); add(ty / 50); add(x_side(sx)); add(x_side(tx));
     add(((sx < 76 && tx > 89) || (tx < 76 && sx > 89)) ? 1 : 0);
     add(open_distance(source_y_mod100)); add(open_distance(target_y_mod100));
+    for (size_t index = 0; index < kVerticalSites.size(); ++index) {
+        add((vertical_mask >> index) & 1U);
+    }
+    for (size_t index = 0; index < kHorizontalSites.size(); ++index) {
+        add((horizontal_mask >> index) & 1U);
+    }
+    for (size_t index = 0; index < generated::kGapBlocks.size(); ++index) {
+        add((blocks >> index) & 1U);
+    }
     add(search_feature(search.raw));
     for (uint32_t value : search.directional) add(search_feature(value));
     add(search_feature(search.best_candidate));
