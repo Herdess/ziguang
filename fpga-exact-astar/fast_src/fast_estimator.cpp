@@ -9,10 +9,23 @@
 namespace srb {
 
 uint32_t FastEstimator::estimate(
-    const Pin& source, const Pin& target, QueryStats& stats) const {
-    if (source.site == target.site && source.port == target.port) return 0;
+    const Pin& source, const Pin& target, QueryStats& stats,
+    FastEstimateFeatures* features) const {
+    FastEstimateFeatures details;
+    details.directional.fill(kInfinity);
+    if (source.site == target.site && source.port == target.port) {
+        details.raw = 0;
+        details.best_candidate = 0;
+        details.second_candidate = 0;
+        details.direct = 0;
+        details.min_initial = 0;
+        details.directional.fill(0);
+        if (features != nullptr) *features = details;
+        return 0;
+    }
     uint32_t direct = kInfinity;
     uint32_t best = kInfinity;
+    uint32_t second = kInfinity;
 
     if (source.site == target.site) {
         for (const ArcEdge& edge : arch_.arcs_from(source.port)) {
@@ -21,10 +34,29 @@ uint32_t FastEstimator::estimate(
     }
 
     auto consider = [&](uint32_t site, uint16_t internal, uint32_t initial) {
-        const uint64_t candidate = static_cast<uint64_t>(initial) +
-                                   heuristic_.estimate(site, internal, target);
+        const auto components = heuristic_.estimate_components(site, internal, target);
+        const uint32_t heuristic = *std::max_element(components.begin(), components.end());
+        const uint64_t candidate = static_cast<uint64_t>(initial) + heuristic;
         ++stats.heuristic_evaluations;
-        if (candidate < best) best = static_cast<uint32_t>(candidate);
+        ++details.candidate_count;
+        details.min_initial = std::min(details.min_initial, initial);
+        details.max_initial = std::max(details.max_initial, initial);
+        for (size_t direction = 0; direction < components.size(); ++direction) {
+            const uint64_t value = static_cast<uint64_t>(initial) + components[direction];
+            details.directional[direction] = std::min<uint32_t>(
+                details.directional[direction], static_cast<uint32_t>(value));
+        }
+        const uint32_t value = static_cast<uint32_t>(candidate);
+        if (value < best) {
+            second = best;
+            best = value;
+            details.best_initial = initial;
+            details.best_x = arch_.site_x(site);
+            details.best_y = arch_.site_y(site);
+            details.best_internal = internal;
+        } else if (value < second) {
+            second = value;
+        }
     };
 
     const int16_t source_internal = arch_.internal_index(source.port);
@@ -50,6 +82,11 @@ uint32_t FastEstimator::estimate(
     }
 
     const uint32_t raw = std::min(best, direct);
+    details.raw = raw;
+    details.best_candidate = best;
+    details.second_candidate = second;
+    details.direct = direct;
+    if (features != nullptr) *features = details;
     if (raw == kInfinity) return raw;
 
     using namespace fast_calibration;
