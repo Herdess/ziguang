@@ -3,6 +3,7 @@
 #include "csv_io.hpp"
 #include "dijkstra.hpp"
 #include "fast_estimator.hpp"
+#include "generalization_model.hpp"
 #include "heuristic.hpp"
 #include "public_golden_cache.hpp"
 
@@ -18,6 +19,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -29,8 +31,11 @@ struct Options {
     fs::path output;
     fs::path path_output;
     fs::path feature_output;
+    fs::path model_feature_output;
+    fs::path generalization_model;
     uint64_t limit = 0;
     uint64_t progress = 0;
+    uint32_t workers = 0;
     srb::DelayMode mode = srb::DelayMode::Exact;
     srb::MarginConfig margin;
     std::string solver = "fast";
@@ -55,12 +60,17 @@ void usage(const char* program) {
         << "  --no-public-cache   disable the optional exact public-Golden lookup\n"
         << "  --no-repeat-accel   disable repeated-million block acceleration\n"
         << "  --feature-output F  write architecture features for offline training\n"
+        << "  --generalization-model F\n"
+        << "                      apply the learned unseen-query residual model\n"
+        << "  --model-feature-output F\n"
+        << "                      write the 79 model inputs for parity testing\n"
         << "  --relative-gap-est  search without Gap Line weights, then add mandatory\n"
         << "                      Gap Line delay from the From/To relative position\n"
         << "  --margin N|auto     restrict search to the endpoint box expanded by N sites;\n"
         << "                      auto covers all legal source first-hop landings\n"
         << "  --limit N           process only the first N data rows (0 means all)\n"
-        << "  --progress N        print progress every N rows (0 disables)\n";
+        << "  --progress N        print progress every N rows (0 disables)\n"
+        << "  --workers N         model inference threads (0 means automatic)\n";
 }
 
 uint64_t parse_u64(const std::string& text, const std::string& option) {
@@ -89,6 +99,8 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "-out") options.output = value(arg);
         else if (arg == "--path-output" || arg == "--path-out") options.path_output = value(arg);
         else if (arg == "--feature-output") options.feature_output = value(arg);
+        else if (arg == "--model-feature-output") options.model_feature_output = value(arg);
+        else if (arg == "--generalization-model") options.generalization_model = value(arg);
         else if (arg == "--arch") (void)value(arg);
         else if (arg == "--solver") options.solver = value(arg);
         else if (arg == "--no-public-cache") options.public_cache = false;
@@ -97,6 +109,11 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--to") options.to = value(arg);
         else if (arg == "--limit") options.limit = parse_u64(value(arg), arg);
         else if (arg == "--progress") options.progress = parse_u64(value(arg), arg);
+        else if (arg == "--workers") {
+            const uint64_t parsed = parse_u64(value(arg), arg);
+            if (parsed > 256) throw std::runtime_error("--workers must be at most 256");
+            options.workers = static_cast<uint32_t>(parsed);
+        }
         else if (arg == "--margin") {
             const std::string text = value(arg);
             if (text == "auto") {
@@ -142,6 +159,21 @@ Options parse_options(int argc, char** argv) {
         options.public_cache = false;
         options.repeat_accel = false;
     }
+    if (!options.generalization_model.empty()) {
+        if (options.solver != "fast") {
+            throw std::runtime_error("--generalization-model requires --solver fast");
+        }
+        if (!options.feature_output.empty()) {
+            throw std::runtime_error(
+                "--generalization-model and --feature-output cannot be combined");
+        }
+        options.public_cache = false;
+        options.repeat_accel = false;
+    }
+    if (!options.model_feature_output.empty() && options.generalization_model.empty()) {
+        throw std::runtime_error(
+            "--model-feature-output requires --generalization-model");
+    }
     return options;
 }
 
@@ -176,6 +208,8 @@ int main(int argc, char** argv) {
         std::unique_ptr<srb::DirectionalPotentialHeuristic> heuristic;
         std::unique_ptr<srb::ExactAStar> astar;
         std::unique_ptr<srb::FastEstimator> fast;
+        std::unique_ptr<srb::GeneralizationFeatures> generalization_features;
+        std::unique_ptr<srb::GeneralizationModel> generalization_model;
         std::unique_ptr<srb::PublicGoldenCache> public_cache;
         if (options.solver == "dijkstra" || options.solver == "verify") {
             dijkstra = std::make_unique<srb::BidirectionalDijkstra>(architecture);
@@ -184,11 +218,36 @@ int main(int argc, char** argv) {
             heuristic = std::make_unique<srb::DirectionalPotentialHeuristic>(architecture);
             if (options.solver == "fast") {
                 fast = std::make_unique<srb::FastEstimator>(architecture, *heuristic);
+                if (!options.generalization_model.empty()) {
+                    generalization_features =
+                        std::make_unique<srb::GeneralizationFeatures>(architecture);
+                    generalization_model = std::make_unique<srb::GeneralizationModel>(
+                        options.generalization_model);
+                    std::cerr << "generalization_model_loaded"
+                              << " trees=" << generalization_model->tree_count()
+                              << " memory_mib="
+                              << (generalization_model->memory_bytes() / 1048576.0)
+                              << " path=" << options.generalization_model.string() << '\n';
+                } else {
+                    const srb::EmbeddedGeneralizationModel embedded =
+                        srb::embedded_generalization_model();
+                    if (embedded.data != nullptr) {
+                        generalization_features =
+                            std::make_unique<srb::GeneralizationFeatures>(architecture);
+                        generalization_model = std::make_unique<srb::GeneralizationModel>(
+                            embedded.data, embedded.size);
+                        std::cerr << "generalization_model_loaded"
+                                  << " trees=" << generalization_model->tree_count()
+                                  << " memory_mib="
+                                  << (generalization_model->memory_bytes() / 1048576.0)
+                                  << " embedded_bytes=" << embedded.size << '\n';
+                    }
+                }
             } else {
                 astar = std::make_unique<srb::ExactAStar>(architecture, *heuristic);
             }
         }
-        if (options.solver == "fast" && options.public_cache) {
+        if (options.solver == "fast" && options.public_cache && !generalization_model) {
             public_cache = std::make_unique<srb::PublicGoldenCache>(architecture);
         }
 
@@ -197,14 +256,24 @@ int main(int argc, char** argv) {
         uint64_t public_cache_hits = 0;
         uint64_t public_cache_misses = 0;
         uint64_t repeat_accelerated_rows = 0;
+        srb::GeneralizationFeatureArray last_model_features{};
         auto solve = [&](const srb::Pin& source, const srb::Pin& target,
-                         std::vector<srb::Pin>* path) {
+                         std::vector<srb::Pin>* path,
+                         srb::GeneralizationFeatureArray* model_features) {
             if (options.solver == "dijkstra") {
                 return dijkstra->shortest(
                     source, target, options.mode, options.margin, stats, path);
             }
             if (options.solver == "fast") {
                 if (path != nullptr) path->clear();
+                if (generalization_model) {
+                    srb::FastEstimateFeatures details;
+                    (void)fast->estimate(source, target, stats, &details);
+                    const auto features = generalization_features->build(
+                        source, target, details);
+                    if (model_features != nullptr) *model_features = features;
+                    return generalization_model->predict(details.raw, features);
+                }
                 return fast->estimate(source, target, stats);
             }
             const uint32_t answer = astar->shortest(source, target, stats, path);
@@ -229,7 +298,7 @@ int main(int argc, char** argv) {
                 ++public_cache_hits;
             } else {
                 if (public_cache) ++public_cache_misses;
-                delay = solve(source, target, &path);
+                delay = solve(source, target, &path, nullptr);
             }
             if (delay == srb::kInfinity) std::cout << -1 << '\n';
             else std::cout << delay << '\n';
@@ -272,6 +341,23 @@ int main(int argc, char** argv) {
                 << "raw,d0,d1,d2,d3,d4,d5,d6,d7,best,second,direct,candidates,"
                    "min_initial,max_initial,best_initial,best_x,best_y,best_internal\n";
         }
+        std::ofstream model_feature_output;
+        if (!options.model_feature_output.empty()) {
+            if (!options.model_feature_output.parent_path().empty()) {
+                fs::create_directories(options.model_feature_output.parent_path());
+            }
+            model_feature_output.open(options.model_feature_output, std::ios::trunc);
+            if (!model_feature_output) {
+                throw std::runtime_error(
+                    "cannot create model feature output " +
+                    options.model_feature_output.string());
+            }
+            for (size_t index = 0; index < srb::kGeneralizationFeatureCount; ++index) {
+                if (index != 0) model_feature_output.put(',');
+                model_feature_output << 'f' << index;
+            }
+            model_feature_output << '\n';
+        }
 
         std::string header;
         if (!std::getline(input, header)) throw std::runtime_error("input CSV is empty");
@@ -285,6 +371,9 @@ int main(int argc, char** argv) {
 
         uint64_t rows = 0;
         uint64_t unreachable = 0;
+        const uint32_t hardware_workers = std::max(1U, std::thread::hardware_concurrency());
+        const uint32_t model_workers = options.workers == 0
+            ? std::min(16U, hardware_workers) : std::max(1U, options.workers);
         constexpr uint64_t kPublicBlockRows = 1000000;
         const bool repeat_candidate = options.repeat_accel && public_cache &&
             options.limit == 0 && options.progress == 0 && options.path_output.empty();
@@ -295,7 +384,106 @@ int main(int argc, char** argv) {
             first_output_block.reserve(48U * 1024U * 1024U);
         }
         std::string line;
-        while ((options.limit == 0 || rows < options.limit) && std::getline(input, line)) {
+        const bool parallel_model = generalization_model && model_workers > 1 &&
+            options.path_output.empty() && options.feature_output.empty() &&
+            options.model_feature_output.empty();
+        if (parallel_model) {
+            struct ParallelRow {
+                std::string from;
+                std::string to;
+                srb::Pin source;
+                srb::Pin target;
+                uint32_t delay = srb::kInfinity;
+            };
+            const size_t batch_capacity = static_cast<size_t>(model_workers) * 2048U;
+            std::vector<ParallelRow> batch;
+            batch.reserve(batch_capacity);
+            uint64_t next_progress = options.progress;
+            while (options.limit == 0 || rows < options.limit) {
+                batch.clear();
+                while (batch.size() < batch_capacity &&
+                       (options.limit == 0 || rows + batch.size() < options.limit) &&
+                       std::getline(input, line)) {
+                    if (line.empty()) continue;
+                    const auto [from, to] = srb::parse_csv_pair_view(line);
+                    ParallelRow item;
+                    item.from.assign(from);
+                    item.to.assign(to);
+                    item.source = architecture.parse_pin(from);
+                    item.target = architecture.parse_pin(to);
+                    batch.push_back(std::move(item));
+                }
+                if (batch.empty()) break;
+
+                std::vector<srb::QueryStats> worker_stats(model_workers);
+                std::vector<std::exception_ptr> worker_errors(model_workers);
+                std::vector<srb::GeneralizationFeatureArray> batch_features(batch.size());
+                std::vector<uint32_t> batch_raw(batch.size());
+                std::vector<uint32_t> batch_output(batch.size());
+                std::vector<std::thread> threads;
+                threads.reserve(model_workers);
+                for (uint32_t worker = 0; worker < model_workers; ++worker) {
+                    const size_t begin = batch.size() * worker / model_workers;
+                    const size_t end = batch.size() * (worker + 1U) / model_workers;
+                    threads.emplace_back([&, worker, begin, end] {
+                        try {
+                            for (size_t index = begin; index < end; ++index) {
+                                srb::FastEstimateFeatures details;
+                                (void)fast->estimate(
+                                    batch[index].source, batch[index].target,
+                                    worker_stats[worker], &details);
+                                batch_features[index] = generalization_features->build(
+                                    batch[index].source, batch[index].target, details);
+                                batch_raw[index] = details.raw;
+                            }
+                        } catch (...) {
+                            worker_errors[worker] = std::current_exception();
+                        }
+                    });
+                }
+                for (std::thread& thread : threads) thread.join();
+                for (const std::exception_ptr& error : worker_errors) {
+                    if (error) std::rethrow_exception(error);
+                }
+                generalization_model->predict_batch(
+                    batch_features.data(), batch_raw.data(), batch_output.data(),
+                    batch.size(), model_workers);
+                for (size_t index = 0; index < batch.size(); ++index) {
+                    batch[index].delay = batch_output[index];
+                }
+                for (const srb::QueryStats& local : worker_stats) {
+                    stats.settled_forward += local.settled_forward;
+                    stats.settled_backward += local.settled_backward;
+                    stats.relaxed += local.relaxed;
+                    stats.bounded_queries += local.bounded_queries;
+                    stats.effective_margin_sum += local.effective_margin_sum;
+                    stats.effective_margin_max = std::max(
+                        stats.effective_margin_max, local.effective_margin_max);
+                    stats.heuristic_evaluations += local.heuristic_evaluations;
+                }
+                for (const ParallelRow& item : batch) {
+                    output << item.from << ',' << item.to << ',';
+                    if (item.delay == srb::kInfinity) {
+                        output << -1;
+                        ++unreachable;
+                    } else {
+                        output << item.delay;
+                    }
+                    output.put('\n');
+                }
+                rows += batch.size();
+                if (options.progress != 0 && rows >= next_progress) {
+                    const double elapsed = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - total_start).count();
+                    std::cerr << "progress rows=" << rows << " elapsed_sec=" << elapsed
+                              << " avg_us=" << (elapsed * 1e6 / rows) << '\n';
+                    while (next_progress <= rows) next_progress += options.progress;
+                }
+                if (!input) break;
+            }
+        }
+        while (!parallel_model &&
+               (options.limit == 0 || rows < options.limit) && std::getline(input, line)) {
             if (line.empty()) continue;
             if (repeat_candidate && rows < kPublicBlockRows) {
                 first_input_block.append(line);
@@ -312,11 +500,15 @@ int main(int argc, char** argv) {
                 if (public_cache) ++public_cache_misses;
                 const srb::Pin source = architecture.parse_pin(from_text);
                 const srb::Pin target = architecture.parse_pin(to_text);
-                if (feature_output) {
+                if (!options.feature_output.empty()) {
                     delay = fast->estimate(source, target, stats, &fast_features);
                     have_fast_features = true;
                 } else {
-                    delay = solve(source, target, path_output ? &path : nullptr);
+                    delay = solve(
+                        source, target,
+                        !options.path_output.empty() ? &path : nullptr,
+                        !options.model_feature_output.empty()
+                            ? &last_model_features : nullptr);
                 }
             }
             output.write(from_text.data(), static_cast<std::streamsize>(from_text.size()));
@@ -350,7 +542,7 @@ int main(int argc, char** argv) {
             if (repeat_candidate && rows < kPublicBlockRows) {
                 first_output_block.push_back('\n');
             }
-            if (path_output) {
+            if (!options.path_output.empty()) {
                 path_output.write(from_text.data(), static_cast<std::streamsize>(from_text.size()));
                 path_output.put(',');
                 path_output.write(to_text.data(), static_cast<std::streamsize>(to_text.size()));
@@ -361,7 +553,14 @@ int main(int argc, char** argv) {
                 path_output << format_path(architecture, path);
                 path_output << '\n';
             }
-            if (feature_output) {
+            if (!options.model_feature_output.empty()) {
+                for (size_t index = 0; index < last_model_features.size(); ++index) {
+                    if (index != 0) model_feature_output.put(',');
+                    model_feature_output << last_model_features[index];
+                }
+                model_feature_output << '\n';
+            }
+            if (!options.feature_output.empty()) {
                 if (!have_fast_features) {
                     throw std::runtime_error("feature row was not computed by fast estimator");
                 }
@@ -439,15 +638,23 @@ int main(int argc, char** argv) {
         }
         output.close();
         if (!output) throw std::runtime_error("failed while writing output " + options.output.string());
-        if (path_output) {
+        if (!options.path_output.empty()) {
             path_output.close();
             if (!path_output) throw std::runtime_error("failed while writing path output " + options.path_output.string());
         }
-        if (feature_output) {
+        if (!options.feature_output.empty()) {
             feature_output.close();
             if (!feature_output) {
                 throw std::runtime_error(
                     "failed while writing feature output " + options.feature_output.string());
+            }
+        }
+        if (!options.model_feature_output.empty()) {
+            model_feature_output.close();
+            if (!model_feature_output) {
+                throw std::runtime_error(
+                    "failed while writing model feature output " +
+                    options.model_feature_output.string());
             }
         }
 
@@ -458,6 +665,7 @@ int main(int argc, char** argv) {
         if (heuristic) estimated_bytes += heuristic->memory_bytes();
         if (astar) estimated_bytes += astar->workspace_bytes();
         if (fast) estimated_bytes += fast->memory_bytes();
+        if (generalization_model) estimated_bytes += generalization_model->memory_bytes();
         if (public_cache) estimated_bytes += public_cache->memory_bytes();
         std::cerr << "completed"
                   << " solver=" << options.solver

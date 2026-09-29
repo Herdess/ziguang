@@ -64,8 +64,12 @@ def main() -> None:
     parser.add_argument("--depth", type=int, default=8)
     parser.add_argument("--min-data", type=int, default=250)
     parser.add_argument("--seed", type=int, default=20260929)
+    parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--output-validation", type=Path,
                         help="optional compressed holdout predictions for ensembling")
+    parser.add_argument("--output-feature-sample", type=Path,
+                        help="optional NPZ containing the first feature rows for C++ parity tests")
+    parser.add_argument("--feature-sample-rows", type=int, default=128)
     parser.add_argument("--target-encoding", action="store_true",
                         help="add leakage-safe category residual statistics")
     parser.add_argument("--objective", choices=("l1", "huber", "fair"),
@@ -279,6 +283,16 @@ def main() -> None:
             feature_columns.append(smoothed_leave_one_out_encoding(
                 key, target_residual, fit_training, smoothing))
     features = np.column_stack(feature_columns).astype(np.float32)
+    if args.output_feature_sample:
+        args.output_feature_sample.parent.mkdir(parents=True, exist_ok=True)
+        sample_rows = min(args.feature_sample_rows, features.shape[0])
+        np.savez_compressed(
+            args.output_feature_sample,
+            names=np.asarray(names),
+            features=features[:sample_rows],
+            base_estimate=base_estimate[:sample_rows],
+        )
+        print(f"feature_sample={args.output_feature_sample} rows={sample_rows}")
     categorical_names = {
         "source_port", "target_port", "direction", "block_mask",
         "source_x_zone", "source_y_zone", "target_x_zone", "target_y_zone",
@@ -322,7 +336,7 @@ def main() -> None:
             "cat_smooth": 20.0,
             "max_cat_threshold": 64,
             "max_bin": 127,
-            "num_threads": 2,
+            "num_threads": args.threads,
             "seed": args.seed,
             "feature_fraction_seed": args.seed,
             "bagging_seed": args.seed,

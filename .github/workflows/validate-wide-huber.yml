@@ -1,0 +1,57 @@
+name: Validate wide low-tree Huber across folds
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fold: [0, 1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install training dependency
+        run: python3 -m pip install --disable-pip-version-check lightgbm
+
+      - name: Build strict no-cache features
+        working-directory: fpga-exact-astar
+        run: |
+          make clean
+          make -j2 EMBED_MODEL=0 CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra -pthread"
+          mkdir -p build/wide-fold-${{ matrix.fold }}
+          ./estimate --no-public-cache --no-repeat-accel \
+            --feature-output build/wide-fold-${{ matrix.fold }}/features.csv \
+            -in data/delay_estimate_ans.csv \
+            -out build/wide-fold-${{ matrix.fold }}/baseline.csv
+
+      - name: Train and score held-out fold
+        working-directory: fpga-exact-astar
+        run: |
+          set -o pipefail
+          python3 tools/train_lightgbm_residual.py \
+            --golden data/delay_estimate_ans.csv \
+            --estimate build/wide-fold-${{ matrix.fold }}/baseline.csv \
+            --features build/wide-fold-${{ matrix.fold }}/features.csv \
+            --base raw \
+            --validation-fold ${{ matrix.fold }} \
+            --seed 20260929 \
+            --objective huber \
+            --learning-rate 0.05 \
+            --output-model build/wide-fold-${{ matrix.fold }}/model.txt \
+            --rounds 900 \
+            --leaves 256 \
+            --depth 12 \
+            --min-data 150 \
+            --threads 2 \
+            --checkpoints 500,700,900 \
+            | tee build/wide-fold-${{ matrix.fold }}/report.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wide-huber-fold-${{ matrix.fold }}
+          path: fpga-exact-astar/build/wide-fold-${{ matrix.fold }}/report.txt
+          if-no-files-found: error
+          retention-days: 30
