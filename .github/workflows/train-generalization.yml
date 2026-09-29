@@ -25,6 +25,7 @@ jobs:
       - name: Train architecture-aware residual model
         working-directory: fpga-exact-astar
         run: |
+          set -o pipefail
           python3 tools/train_lightgbm_residual.py \
             --golden data/delay_estimate_ans.csv \
             --estimate build/model/baseline_no_cache_1m.csv \
