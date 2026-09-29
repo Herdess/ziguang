@@ -21,7 +21,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        seed: [20260929, 20260930, 20260931]
+        include:
+          - name: l1
+            seed: 20260930
+            objective: l1
+          - name: huber
+            seed: 20260929
+            objective: huber
+          - name: fair
+            seed: 20260931
+            objective: fair
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +62,7 @@ jobs:
             --features build/model/${{ matrix.seed }}/search_features.csv \
             --base "${{ inputs.base }}" \
             --seed ${{ matrix.seed }} \
+            --objective ${{ matrix.objective }} \
             --output-model build/model/${{ matrix.seed }}/generalization_model.txt \
             --output-validation build/model/${{ matrix.seed }}/validation_predictions.npz \
             --rounds 3000 \
@@ -64,7 +74,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: generalization-model-${{ inputs.base }}-${{ matrix.seed }}
+          name: generalization-model-${{ inputs.base }}-${{ matrix.name }}
           path: |
             fpga-exact-astar/build/model/${{ matrix.seed }}/generalization_model.txt
             fpga-exact-astar/build/model/${{ matrix.seed }}/training_report.txt
