@@ -184,9 +184,16 @@ void DirectionalPotentialHeuristic::build() {
 
 uint32_t DirectionalPotentialHeuristic::estimate(
     uint32_t site, uint16_t internal, const Pin& target) const {
+    const auto components = estimate_components(site, internal, target);
+    return *std::max_element(components.begin(), components.end());
+}
+
+std::array<uint32_t, DirectionalPotentialHeuristic::kDirectionCount>
+DirectionalPotentialHeuristic::estimate_components(
+    uint32_t site, uint16_t internal, const Pin& target) const {
     const int32_t dx = static_cast<int32_t>(arch_.site_x(target.site)) - arch_.site_x(site);
     const int32_t dy = static_cast<int32_t>(arch_.site_y(target.site)) - arch_.site_y(site);
-    uint32_t result = 0;
+    std::array<uint32_t, kDirectionCount> result{};
     for (size_t direction = 0; direction < kDirectionCount; ++direction) {
         const uint32_t potential = potentials_[potential_index(direction, target.port, internal)];
         if (potential == kPotentialInfinity) continue;
@@ -199,7 +206,7 @@ uint32_t DirectionalPotentialHeuristic::estimate(
         // preserves consistency while being one unit stronger than floor.
         const uint64_t value =
             (static_cast<uint64_t>(numerator) + kScale - 1) / kScale;
-        result = std::max<uint32_t>(result, static_cast<uint32_t>(value));
+        result[direction] = static_cast<uint32_t>(value);
     }
     return result;
 }
@@ -209,4 +216,3 @@ size_t DirectionalPotentialHeuristic::memory_bytes() const {
 }
 
 }  // namespace srb
-

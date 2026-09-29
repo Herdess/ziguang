@@ -28,6 +28,7 @@ struct Options {
     fs::path input;
     fs::path output;
     fs::path path_output;
+    fs::path feature_output;
     uint64_t limit = 0;
     uint64_t progress = 0;
     srb::DelayMode mode = srb::DelayMode::Exact;
@@ -53,6 +54,7 @@ void usage(const char* program) {
         << "                      original bidirectional Dijkstra, or exact verification\n"
         << "  --no-public-cache   disable the optional exact public-Golden lookup\n"
         << "  --no-repeat-accel   disable repeated-million block acceleration\n"
+        << "  --feature-output F  write architecture features for offline training\n"
         << "  --relative-gap-est  search without Gap Line weights, then add mandatory\n"
         << "                      Gap Line delay from the From/To relative position\n"
         << "  --margin N|auto     restrict search to the endpoint box expanded by N sites;\n"
@@ -86,6 +88,7 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--output" || arg == "-o") options.output = value(arg);
         else if (arg == "-out") options.output = value(arg);
         else if (arg == "--path-output" || arg == "--path-out") options.path_output = value(arg);
+        else if (arg == "--feature-output") options.feature_output = value(arg);
         else if (arg == "--arch") (void)value(arg);
         else if (arg == "--solver") options.solver = value(arg);
         else if (arg == "--no-public-cache") options.public_cache = false;
@@ -131,6 +134,13 @@ Options parse_options(int argc, char** argv) {
     }
     if (options.solver != "dijkstra" && options.margin.mode != srb::MarginMode::Disabled) {
         throw std::runtime_error("only the Dijkstra solver supports --margin");
+    }
+    if (!options.feature_output.empty()) {
+        if (options.solver != "fast") {
+            throw std::runtime_error("--feature-output requires --solver fast");
+        }
+        options.public_cache = false;
+        options.repeat_accel = false;
     }
     return options;
 }
@@ -248,6 +258,20 @@ int main(int argc, char** argv) {
             if (!path_output) throw std::runtime_error("cannot create path output " + options.path_output.string());
             path_output << "From,To,Min Delay,Path\n";
         }
+        std::ofstream feature_output;
+        if (!options.feature_output.empty()) {
+            if (!options.feature_output.parent_path().empty()) {
+                fs::create_directories(options.feature_output.parent_path());
+            }
+            feature_output.open(options.feature_output, std::ios::trunc);
+            if (!feature_output) {
+                throw std::runtime_error(
+                    "cannot create feature output " + options.feature_output.string());
+            }
+            feature_output
+                << "raw,d0,d1,d2,d3,d4,d5,d6,d7,best,second,direct,candidates,"
+                   "min_initial,max_initial,best_initial,best_x,best_y,best_internal\n";
+        }
 
         std::string header;
         if (!std::getline(input, header)) throw std::runtime_error("input CSV is empty");
@@ -280,13 +304,20 @@ int main(int argc, char** argv) {
             const auto [from_text, to_text] = srb::parse_csv_pair_view(line);
             std::vector<srb::Pin> path;
             uint32_t delay = srb::kInfinity;
+            srb::FastEstimateFeatures fast_features;
+            bool have_fast_features = false;
             if (public_cache && public_cache->lookup(rows, from_text, to_text, delay)) {
                 ++public_cache_hits;
             } else {
                 if (public_cache) ++public_cache_misses;
                 const srb::Pin source = architecture.parse_pin(from_text);
                 const srb::Pin target = architecture.parse_pin(to_text);
-                delay = solve(source, target, path_output ? &path : nullptr);
+                if (feature_output) {
+                    delay = fast->estimate(source, target, stats, &fast_features);
+                    have_fast_features = true;
+                } else {
+                    delay = solve(source, target, path_output ? &path : nullptr);
+                }
             }
             output.write(from_text.data(), static_cast<std::streamsize>(from_text.size()));
             output.put(',');
@@ -329,6 +360,29 @@ int main(int argc, char** argv) {
                 path_output << ',';
                 path_output << format_path(architecture, path);
                 path_output << '\n';
+            }
+            if (feature_output) {
+                if (!have_fast_features) {
+                    throw std::runtime_error("feature row was not computed by fast estimator");
+                }
+                auto finite = [](uint32_t value) {
+                    return value == srb::kInfinity ? -1LL : static_cast<long long>(value);
+                };
+                feature_output << finite(fast_features.raw);
+                for (uint32_t value : fast_features.directional) {
+                    feature_output << ',' << finite(value);
+                }
+                feature_output
+                    << ',' << finite(fast_features.best_candidate)
+                    << ',' << finite(fast_features.second_candidate)
+                    << ',' << finite(fast_features.direct)
+                    << ',' << fast_features.candidate_count
+                    << ',' << finite(fast_features.min_initial)
+                    << ',' << fast_features.max_initial
+                    << ',' << fast_features.best_initial
+                    << ',' << fast_features.best_x
+                    << ',' << fast_features.best_y
+                    << ',' << fast_features.best_internal << '\n';
             }
             ++rows;
             if (repeat_candidate && rows == kPublicBlockRows && input) {
@@ -388,6 +442,13 @@ int main(int argc, char** argv) {
         if (path_output) {
             path_output.close();
             if (!path_output) throw std::runtime_error("failed while writing path output " + options.path_output.string());
+        }
+        if (feature_output) {
+            feature_output.close();
+            if (!feature_output) {
+                throw std::runtime_error(
+                    "failed while writing feature output " + options.feature_output.string());
+            }
         }
 
         const double runtime = std::chrono::duration<double>(

@@ -19,6 +19,7 @@ jobs:
           make -j2 CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra"
           mkdir -p build/model
           ./estimate --no-public-cache --no-repeat-accel \
+            --feature-output build/model/search_features.csv \
             -in data/delay_estimate_ans.csv \
             -out build/model/baseline_no_cache_1m.csv
 
@@ -29,7 +30,9 @@ jobs:
           python3 tools/train_lightgbm_residual.py \
             --golden data/delay_estimate_ans.csv \
             --estimate build/model/baseline_no_cache_1m.csv \
+            --features build/model/search_features.csv \
             --output-model build/model/generalization_model.txt \
+            --rounds 2000 \
             | tee build/model/training_report.txt
 
       - uses: actions/upload-artifact@v4

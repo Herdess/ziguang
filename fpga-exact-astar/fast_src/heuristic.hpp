@@ -25,6 +25,8 @@ public:
     explicit DirectionalPotentialHeuristic(const Architecture& architecture);
 
     uint32_t estimate(uint32_t site, uint16_t internal, const Pin& target) const;
+    std::array<uint32_t, kDirectionCount> estimate_components(
+        uint32_t site, uint16_t internal, const Pin& target) const;
     const std::array<DirectionCoefficient, kDirectionCount>& coefficients() const {
         return coefficients_;
     }
@@ -45,4 +47,3 @@ private:
 };
 
 }  // namespace srb
-

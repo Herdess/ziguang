@@ -23,6 +23,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--golden", type=Path, required=True)
     parser.add_argument("--estimate", type=Path, required=True)
+    parser.add_argument("--features", type=Path,
+                        help="numeric feature CSV emitted by --feature-output")
     parser.add_argument("--arch-header", type=Path,
                         default=Path("fast_src/generated_arch_data.hpp"))
     parser.add_argument("--gap", type=Path, default=Path("arch/SRB_Gap.json"))
@@ -89,7 +91,7 @@ def main() -> None:
         "source_nearest_hgap", "target_nearest_hgap",
         "dx_mod_10", "dy_mod_12",
     ]
-    features = np.column_stack([
+    feature_columns = [
         estimate, sx, sy, tx, ty, dx, dy, abs_dx, abs_dy,
         abs_dx + abs_dy, np.maximum(abs_dx, abs_dy),
         source, target, sign, midpoint_x, midpoint_y,
@@ -99,7 +101,18 @@ def main() -> None:
         nearest_vertical_source, nearest_vertical_target,
         nearest_horizontal_source, nearest_horizontal_target,
         abs_dx % 10, abs_dy % 12,
-    ]).astype(np.float32)
+    ]
+    if args.features:
+        with args.features.open(encoding="utf-8") as handle:
+            search_names = ["search_" + name for name in handle.readline().strip().split(",")]
+        search_features = np.loadtxt(
+            args.features, delimiter=",", skiprows=1, dtype=np.float32)
+        if search_features.shape[0] != golden.size:
+            raise ValueError("search feature row count does not match Golden rows")
+        names.extend(search_names)
+        feature_columns.extend(search_features[:, index]
+                               for index in range(search_features.shape[1]))
+    features = np.column_stack(feature_columns).astype(np.float32)
 
     positive = (golden > 0) & (estimate > 0)
     fit_training = training & positive
@@ -146,6 +159,12 @@ def main() -> None:
         params, train_set, num_boost_round=args.rounds,
         valid_sets=[validation_set], valid_names=["validation"],
         callbacks=[lgb.early_stopping(80), lgb.log_evaluation(50)])
+
+    importance = sorted(
+        zip(names, model.feature_importance(importance_type="gain")),
+        key=lambda item: item[1], reverse=True)
+    print("feature_importance=" + ",".join(
+        f"{name}:{gain:.1f}" for name, gain in importance[:20]))
 
     prediction = estimate[validation].astype(np.int64).copy()
     residual = model.predict(
