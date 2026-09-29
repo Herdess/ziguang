@@ -28,6 +28,8 @@ if (Test-Path -LiteralPath $ResolvedPackageDir) {
 New-Item -ItemType Directory -Path $ResolvedPackageDir -Force | Out-Null
 
 Copy-Item -LiteralPath $BuiltExe -Destination (Join-Path $ResolvedPackageDir 'estimate.exe')
+Copy-Item -LiteralPath (Join-Path $ProjectRoot 'models\generalization_model.srb') `
+    -Destination (Join-Path $ResolvedPackageDir 'generalization_model.srb')
 Copy-Item -LiteralPath (Join-Path $ExampleSource 'README.txt') -Destination $ResolvedPackageDir
 Copy-Item -LiteralPath (Join-Path $ExampleSource 'run_sample.bat') -Destination $ResolvedPackageDir
 Copy-Item -LiteralPath (Join-Path $Examples 'delay_estimate_request.csv') -Destination $ResolvedPackageDir
@@ -42,5 +44,14 @@ try {
 }
 
 New-Item -ItemType Directory -Path $DistRoot -Force | Out-Null
-Compress-Archive -LiteralPath $ResolvedPackageDir -DestinationPath $ZipPath -Force
+$Compressed = $false
+for ($Attempt = 1; $Attempt -le 5 -and -not $Compressed; ++$Attempt) {
+    try {
+        Compress-Archive -LiteralPath $ResolvedPackageDir -DestinationPath $ZipPath -Force
+        $Compressed = $true
+    } catch {
+        if ($Attempt -eq 5) { throw }
+        Start-Sleep -Seconds 1
+    }
+}
 Write-Host "Created submission example: $ZipPath"

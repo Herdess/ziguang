@@ -12,10 +12,15 @@ add_executable(estimate
     fast_src/heuristic.cpp
     fast_src/astar.cpp
     fast_src/fast_estimator.cpp
+    fast_src/generalization_model.cpp
+    fast_src/embedded_generalization_model.cpp
+    fast_src/prediction_cache.cpp
     fast_src/public_golden_cache.cpp
     fast_src/csv_io.cpp
 )
 target_include_directories(estimate PRIVATE fast_src)
+find_package(Threads REQUIRED)
+target_link_libraries(estimate PRIVATE Threads::Threads)
 
 if(MSVC)
     target_compile_options(estimate PRIVATE /O2 /W4)

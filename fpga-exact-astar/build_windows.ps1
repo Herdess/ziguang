@@ -15,6 +15,9 @@ $Sources = @(
     (Join-Path $ProjectRoot 'fast_src\heuristic.cpp'),
     (Join-Path $ProjectRoot 'fast_src\astar.cpp'),
     (Join-Path $ProjectRoot 'fast_src\fast_estimator.cpp'),
+    (Join-Path $ProjectRoot 'fast_src\generalization_model.cpp'),
+    (Join-Path $ProjectRoot 'fast_src\embedded_generalization_model.cpp'),
+    (Join-Path $ProjectRoot 'fast_src\prediction_cache.cpp'),
     (Join-Path $ProjectRoot 'fast_src\public_golden_cache.cpp'),
     (Join-Path $ProjectRoot 'fast_src\csv_io.cpp')
 )

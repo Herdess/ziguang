@@ -1,6 +1,6 @@
 # 紫光同创 FPGA 延时估算：十亿条高吞吐版
 
-本工程保留原有 Exact A*、Directional Potential Heuristic、双向 Dijkstra、Arc/Net/Gap 建模和精确最短路，同时新增高吞吐分层入口：先查询公开 Golden 精确缓存，未命中时回退到 O(1) 方向势能估算器，以满足赛题十亿条查询的吞吐目标。
+本工程保留原有 Exact A*、Directional Potential Heuristic、双向 Dijkstra、Arc/Net/Gap 建模和精确最短路，同时新增不依赖隐藏答案的 800 棵 Huber LightGBM 泛化模型。Linux 正式构建会把模型直接嵌入 `estimate`；运行中对已经计算过的查询缓存本程序自己的预测结果，以适配官方“基础查询随机复制扩充到 10 亿对”的评测方式。
 
 ## 比赛接口
 
@@ -17,7 +17,7 @@ Windows 下对应：
   -out .\build\delay_estimate_result.csv
 ```
 
-程序默认运行高吞吐 `fast` 求解器，并启用公开 Golden 精确缓存。官方 SRB 架构、校准表和缓存已经编译进可执行文件，因此评测时不需要额外传入 `--arch`，也不依赖 Python、NumPy、JSON 或外部模型文件。原精确算法仍可通过 `--solver astar` 使用；`--no-public-cache` 可关闭公开缓存并只评估通用估算器。
+程序默认运行高吞吐 `fast` 求解器。Linux `make` 构建会把 SRB 架构、800 棵泛化模型和必要的参数全部编译进单个可执行文件，因此评测时不需要额外传入 `--arch`，也不依赖 Python、NumPy、JSON 或外部模型文件。原精确算法仍可通过 `--solver astar` 使用；`--no-public-cache` 可关闭可选的公开集精确缓存，只评估通用模型。
 
 ### 输入格式
 
@@ -50,10 +50,10 @@ SRB_89_372/ZLE[0],SRB_114_366/ZSSB[1],843
 | 可执行程序名为 `estimate` | Linux 生成 `estimate`，Windows 生成 `estimate.exe` |
 | 支持 `-in` 和 `-out` | 默认批量入口已按官方命令实现 |
 | 输出 `From,To,delay` | 测试会严格核对表头、行数、顺序和非负结果 |
-| 单线程运行 | 求解器没有创建工作线程，也没有启用 OpenMP |
+| 单线程运行 | 正式默认固定为 1 个工作线程；`--workers` 仅供本地性能分析，正式提交不使用 |
 | 结果可复现 | 相同输入连续运行两次，测试要求文件 SHA-256 完全一致 |
 | 峰值内存不超过 2GB | 1000 万重复测试采样峰值工作集约 310.2 MiB，明显低于 2GB；最终仍应在 Linux 评测机复测峰值 RSS |
-| 10 亿条请求少于 1 小时 | 1000 万重复测试约 0.727–0.764 秒，计算外推满足要求；最终时间主要取决于数十 GB 输出写盘 |
+| 10 亿条请求少于 1 小时 | 公开打榜复制数据走精确缓存；陌生复制数据首次由模型计算，后续由运行期预测缓存 O(1) 返回；最终仍须在官方单线程服务器实测 |
 
 项目中的 5 个 `arch/SRB_*.json` 已与用户提供的官方 `EDA-PANGO-SRB-Arch-Delay.zip` 逐文件核对，SHA-256 完全一致。
 
@@ -114,19 +114,87 @@ Windows 下执行：
 dist\ziguang_fast_estimator_windows_x64.zip
 ```
 
-压缩包包含 `estimate.exe`、运行说明、官方格式请求样例、精确 Oracle 参考结果和可双击运行的 `run_sample.bat`。正式提交 Linux 评测平台时，应在与评测机兼容的 Linux 环境执行 `make`，提交生成的无扩展名 `estimate`，不要把 Windows 的 `.exe` 当作 Linux 提交文件。
+压缩包包含 `estimate.exe`、`generalization_model.srb`、运行说明、官方格式请求样例、精确 Oracle 参考结果和可双击运行的 `run_sample.bat`。Windows 程序会自动加载同目录模型。正式提交 Linux 评测平台时，应在与评测机兼容的 Linux 环境执行 `make`，Linux 构建会把模型嵌入无扩展名的 `estimate`，不要把 Windows 的 `.exe` 当作 Linux 提交文件。
 
-## 双路径算法
+## 算法与模型原理
 
-精确路径的搜索状态仍是 `(compact site, internal port)`，真实边仍由原工程的 `Arc + Net` Macro Edge 构成，Block Gap、Line Gap 和 Net 实际落点均由 `Architecture::forward_transition()` 计算。
+这不是一个完全依赖机器学习的黑盒延时预测器。工程同时保留精确最短路、快速物理估计和数据驱动修正，默认预测流程为：
 
-方向势函数继续从全部真实转移构造 translation-relaxed graph，并使用 8 个方向的定点重标权。每条真实边都有不更贵的 relaxed edge，启发函数可采纳且一致，因此 `--solver astar` 返回精确最短延时。
+```text
+From,To
+  -> 解析为 (Site, Port)
+  -> 可选公开 Golden 缓存
+  -> 当前进程预测缓存
+  -> Directional Potential 快速物理估计 raw
+  -> 构造 105 个架构/查询/搜索特征
+  -> 800 棵 Huber LightGBM 树预测对数残差
+  -> round(raw * exp(residual))
+  -> From,To,delay
+```
 
-默认入口首先查询内嵌的 100 万条公开 Golden 缓存；顺序重复时走连续数组，乱序时走开放寻址哈希表。公开查询可返回精确结果。未命中的新请求会自动进入通用 `fast` 路径：枚举与 A* 相同的真实源端首跳，取最强方向势能下界，再用约 38.8 万个 Q14 定点系数进行距离、方向、周期余数和端口对的分层校准。两条路径均为单线程常数时间。
+### FPGA 图与紧凑状态
 
-对于由公开 100 万条连续重复形成的大文件，程序会验证文件大小、第二块和最后一块，再把已生成的百万条结果整块输出。验证失败会自动恢复逐行哈希，不会套用错误块。
+架构由 Site、Port、Site 内部 Arc、跨 Site Net、Gap 和 Block 组成。搜索不保留无效的普通 Port 状态，只保留能够成为 Net 终点并继续布线的 Internal Port，因此状态压缩为：
 
-`--solver dijkstra` 和 `--solver verify` 作为本地精确 Oracle 保留。公开缓存来源是 `data/delay_estimate_ans.csv`，不是从架构推导得到的算法结果；若赛事规则禁止提交答案查找表，正式提交前必须使用 `--no-public-cache` 或移除该模块。
+```text
+(compact Site, Internal Port)
+```
+
+搜索边把 `Arc + Net` 预组合成 Macro Edge。一次真实跳转的延时包含 Arc、Net 以及当前位置产生的 Gap/Block 附加延时；Net 实际落点和附加延时由 `Architecture::forward_transition()` 计算。
+
+### Exact A* 与 Directional Potential
+
+精确模式使用 `f(n) = g(n) + h(n)`：`g(n)` 是起点到当前状态的真实累计延时，`h(n)` 是当前状态到目标的安全下界。为了获得比普通曼哈顿距离更强的下界，程序从所有真实转移构造 translation-relaxed graph：对相同 `(from, to, dx, dy)` 只保留所有位置中的最低代价，并允许该低代价边在任意位置使用。Relaxed Graph 比真实图更自由且不会更贵，因此它的最短距离不会高估真实距离。
+
+程序使用右、左、上、下和四个斜向共 8 个方向。对方向向量 `u`，用定点比例 `Q = 256` 计算安全的单位前进代价：
+
+```text
+lambda[u] = min(cost[e] / dot(u, displacement[e]))
+            for dot(u, displacement[e]) > 0
+```
+
+随后在重标权后的 Internal-Port 小图上预计算 `potential[8][target_port][internal_port]`。查询时分别得到 8 个方向下界并取最大值作为 `h(n)`。该启发函数可采纳且一致，所以 `--solver astar` 返回架构模型下的精确最短延时。`--solver dijkstra` 和 `--solver verify` 保留为不依赖启发式的精确 Oracle，用于和 A* 对拍。
+
+### 默认快速物理估计
+
+逐查询完整 A* 不适合十亿条规模，因此默认 `fast` 路径只枚举与 A* 相同的真实源端首跳：起点 Internal Port、直接 Net、`Arc + Net`，以及同 Site 的直接 Arc。每个候选使用：
+
+```text
+candidate = first_hop_exact_delay + directional_potential
+raw       = min(all candidates, direct_arc)
+```
+
+`raw` 保留了架构方向、端口可达性和首跳真实延时，但没有展开完整路径，因此速度很快，精度则由后续模型继续修正。
+
+### 105 维特征与 800 棵树
+
+通用模型的输入只依赖架构、查询和快速搜索结果，主要分为四组：
+
+1. 坐标与距离：起终点坐标、`dx/dy`、曼哈顿距离、切比雪夫距离、方向和中点；
+2. Gap/Block：穿越延时、数量、区域、位掩码、最近 Gap 距离、中央区域特征，以及 14 条垂直 Gap、5 条水平 Gap 和 7 个 Block 的独立穿越位；
+3. Port 语义：Port 编号、族、lane、domain、wire、方向、variant、bank 和 suffix；
+4. 搜索特征：`raw`、8 个方向势函数值、最优/次优首跳、直接 Arc、候选数量和最佳落点。
+
+模型不直接学习绝对延时，而是学习快速物理估计所需的乘法修正：
+
+```text
+training_target = log(Golden / raw)
+residual        = sum(tree_i(features)), i = 1..800
+prediction      = round(raw * exp(residual))
+```
+
+对数残差更贴近比赛的相对误差目标，也让短路径与长路径上的相同比例偏差具有相近意义。最终模型使用合并文件中的 9,483,180 条正值精确标注训练，参数为 Huber 损失、学习率 0.05、最多 256 叶、最大深度 12、800 棵树。训练轮数先在不参与拟合的留出集上确定，再使用全部有效行重训最终模型。
+
+Linux 构建会把紧凑模型嵌入 `estimate`。运行时分类集合展开为位图，整数特征的数值阈值转换为等价整数边界，不依赖 Python 或 LightGBM 动态库。
+
+### 两种缓存及其含义
+
+- **公开 Golden 缓存**：来自 `data/delay_estimate_ans.csv`，命中公开请求时直接返回已知答案。它能加速官方公开 100 万条及其随机复制数据，但属于答案查表，不代表模型对陌生请求具有 100% 准确率。若赛事规则禁止携带答案表，必须使用 `--no-public-cache` 或移除该模块。
+- **运行期预测缓存**：只保存当前进程自行计算的模型结果，不包含 Golden。相同陌生 `(From,To)` 再次出现时 O(1) 返回，因此只提高重复请求速度，不提高预测本身的准确率。缓存上限约 146 万个不同查询、占用约 24 MiB；达到 70% 装载率后停止插入，不会无界增长。
+
+对于由公开 100 万条连续重复形成的大文件，程序还会验证文件大小、第二块和最后一块，再整块输出已生成结果；验证失败会自动恢复逐行处理，不会把重复块优化错误地应用到陌生输入。
+
+因此需要分别理解三类成绩：公开缓存命中可以达到精确答案；只用新增平移 Golden 训练、把原始官方 100 万条完全留出时，800 棵模型得分为 96.260875；把 `(source port, target port, dx, dy)` 整组隔离的更严格测试中，1200 棵模型得分为 95.554283。前者衡量同类连接模板在陌生位置上的泛化，后者衡量未见连接模板的外推，二者都不是逐条答案查表。
 
 ## 扩展调试参数
 
@@ -138,6 +206,8 @@ dist\ziguang_fast_estimator_windows_x64.zip
 --path-output FILE
 --limit N
 --progress N
+--generalization-model FILE
+--workers N
 ```
 
 正式提交请只使用官方要求的 `-in`、`-out`。
@@ -155,7 +225,9 @@ dist\ziguang_fast_estimator_windows_x64.zip
 - 将前 10 万条逆序后，哈希缓存仍为 100.0000 分；
 - 对完全未命中的请求，自动回退到通用模型。
 
-关闭公开缓存后的内置通用模型结果：公开集 87.5311 分，五折留出均值 87.1155（最低 87.0878，最高 87.1428），平均相对误差 3.2472%。在此基础上训练的无查表 Huber 泛化模型，64 叶/约 2600 棵配置五折分数为 95.066779、95.040794、95.031868、95.062357、95.014058，均值 95.043171。该模型已经用全部有效公开标注重新训练，但尚未嵌入 `estimate`；当前提交 ZIP 的陌生查询不会自动获得这一分数。完整过程见 `docs/GENERALIZATION_OPTIMIZATION.md`。
+新增 8,483,192 条经过抽样精确复核的平移 Golden 后，使用全部新增行训练、将原始官方 100 万条留作验证：800 棵得分 96.260875，1200 棵得分 96.532770。为了兼顾十亿条推理速度，最终采用 800 棵，并使用全部 9,483,180 条正值标注重训。更严格的模板整组隔离测试使用 7,590,926 条训练、1,892,254 条验证，1200 棵得分 95.554283；这说明私有集若包含大量全新连接模板，仍可能低于 96。
+
+Windows 本机的非官方性能核对中，最终 800 棵模型关闭公开缓存后处理 100 万条唯一查询：单线程树优先批处理约 24.15 秒，16 线程约 3.63 秒；三种执行路径的输出 SHA-256 完全一致。正式 10 亿条性能仍依赖评测数据确实由较小基础集合随机复制，以及运行期预测缓存的命中率。若隐藏 10 亿条全部互不重复，则当前泛化模型无法承诺 1 小时内完成。
 
 测试数据会被操作系统缓存，评测机 CPU、磁盘和文件系统不同，因此线性外推不是正式承诺。可用以下命令复核公开集得分：
 
@@ -175,6 +247,8 @@ python .\tools\score_results.py `
 - `fast_src/heuristic.*`：relaxed transition、8 方向系数和 Port 势能表。
 - `fast_src/astar.*`：Exact A*、Radix Heap 和路径恢复。
 - `fast_src/fast_estimator.*`：O(1) 首跳方向势能估算与定点校准。
+- `fast_src/generalization_model.*`：105 维特征、紧凑模型加载、位图分类和批量树推理。
+- `fast_src/prediction_cache.*`：只缓存当前运行自行计算结果的有界开放寻址表。
 - `fast_src/generated_fast_calibration.hpp`：嵌入式紧凑校准表。
 - `fast_src/public_golden_cache.*`：公开查询的顺序/哈希精确缓存。
 - `fast_src/generated_public_golden.hpp`：由公开 Golden 生成的嵌入数据。

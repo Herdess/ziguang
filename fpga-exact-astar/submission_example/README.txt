@@ -15,10 +15,11 @@ Windows 本地示例：
   数据行顺序与输入保持一致，delay 单位为 ps。
 
 estimate/estimate.exe 已内置官方 SRB 架构数据，运行时不需要 arch 目录。
-程序为单线程，结果确定且可复现。
+Windows 包中的 generalization_model.srb 必须与 estimate.exe 放在同一目录；
+Linux 正式构建会把模型直接嵌入 estimate。程序默认单线程，结果确定且可复现。
 
-默认先使用公开 Golden 精确缓存，未命中时回退到十亿条吞吐优化的
-O(1) Directional Potential 快速估算器。
+默认先使用公开 Golden 精确缓存，未命中时回退到 Directional Potential
+快速物理估计与 800 棵 Huber 泛化模型。
 公开缓存来自已提供的 delay_estimate_ans.csv，不是算法推导结果；
 若比赛规则禁止答案查找表，请增加 --no-public-cache 或移除缓存模块。
 对于连续重复的公开百万条，程序会验证重复块后批量输出；
