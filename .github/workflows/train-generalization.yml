@@ -41,7 +41,7 @@ jobs:
             --features build/model/search_features.csv \
             --base "${{ inputs.base }}" \
             --output-model build/model/generalization_model.txt \
-            --rounds 3000 \
+            --rounds 4000 \
             --leaves 48 \
             --depth 8 \
             --min-data 250 \
