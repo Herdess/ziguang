@@ -46,7 +46,7 @@ jobs:
             --depth 12 \
             --min-data 150 \
             --threads 2 \
-            --checkpoints 500,700,900 \
+            --checkpoints 500,700 \
             | tee build/wide-fold-${{ matrix.fold }}/report.txt
 
       - uses: actions/upload-artifact@v4

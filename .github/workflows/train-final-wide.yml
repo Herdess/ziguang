@@ -1,0 +1,65 @@
+name: Train final wide low-tree model
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install training dependency
+        run: python3 -m pip install --disable-pip-version-check lightgbm
+
+      - name: Build strict no-cache features
+        working-directory: fpga-exact-astar
+        run: |
+          make clean
+          make -j2 EMBED_MODEL=0 CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra -pthread"
+          mkdir -p build/final-wide
+          ./estimate --no-public-cache --no-repeat-accel \
+            --feature-output build/final-wide/features.csv \
+            -in data/delay_estimate_ans.csv \
+            -out build/final-wide/baseline.csv
+
+      - name: Train on every public Golden row
+        working-directory: fpga-exact-astar
+        run: |
+          set -o pipefail
+          python3 tools/train_lightgbm_residual.py \
+            --golden data/delay_estimate_ans.csv \
+            --estimate build/final-wide/baseline.csv \
+            --features build/final-wide/features.csv \
+            --base raw \
+            --train-all \
+            --seed 20260929 \
+            --objective huber \
+            --learning-rate 0.05 \
+            --output-model build/final-wide/model.txt \
+            --rounds 700 \
+            --leaves 256 \
+            --depth 12 \
+            --min-data 150 \
+            --threads 2 \
+            | tee build/final-wide/report.txt
+
+      - name: Convert and verify compact runtime model
+        working-directory: fpga-exact-astar
+        run: |
+          python3 tools/convert_lightgbm_model.py \
+            --input-model build/final-wide/model.txt \
+            --output build/final-wide/generalization_model.srb \
+            --storage compact \
+            | tee build/final-wide/conversion.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-wide-model
+          path: |
+            fpga-exact-astar/build/final-wide/model.txt
+            fpga-exact-astar/build/final-wide/generalization_model.srb
+            fpga-exact-astar/build/final-wide/report.txt
+            fpga-exact-astar/build/final-wide/conversion.txt
+          if-no-files-found: error
+          retention-days: 30
