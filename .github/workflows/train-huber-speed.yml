@@ -12,13 +12,22 @@ jobs:
         include:
           - name: balanced
             learning_rate: 0.05
-            rounds: 2800
+            rounds: 2600
+            leaves: 64
+            depth: 9
+            min_data: 200
           - name: fast
-            learning_rate: 0.075
-            rounds: 1900
+            learning_rate: 0.06
+            rounds: 2200
+            leaves: 80
+            depth: 10
+            min_data: 180
           - name: ultra
-            learning_rate: 0.10
-            rounds: 1500
+            learning_rate: 0.075
+            rounds: 1800
+            leaves: 96
+            depth: 10
+            min_data: 160
     steps:
       - uses: actions/checkout@v4
 
@@ -51,9 +60,9 @@ jobs:
             --output-model build/huber-${{ matrix.name }}/model.txt \
             --output-validation build/huber-${{ matrix.name }}/validation.npz \
             --rounds ${{ matrix.rounds }} \
-            --leaves 48 \
-            --depth 8 \
-            --min-data 250 \
+            --leaves ${{ matrix.leaves }} \
+            --depth ${{ matrix.depth }} \
+            --min-data ${{ matrix.min_data }} \
             | tee build/huber-${{ matrix.name }}/report.txt
 
       - uses: actions/upload-artifact@v4
