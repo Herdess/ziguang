@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import lightgbm as lgb
@@ -64,6 +65,14 @@ def main() -> None:
     horizontal_count = crossed_delay(
         sy, ty, horizontal_sites, np.ones(len(horizontal), dtype=np.int32))
     blocks = block_mask(sx, sy, tx, ty, gap["Block"])
+    vertical_mask = np.zeros(golden.size, dtype=np.int32)
+    for index, site in enumerate(vertical_sites):
+        vertical_mask |= (((np.minimum(sx, tx) <= site) &
+                           (site < np.maximum(sx, tx))).astype(np.int32) << index)
+    horizontal_mask = np.zeros(golden.size, dtype=np.int32)
+    for index, site in enumerate(horizontal_sites):
+        horizontal_mask |= (((np.minimum(sy, ty) <= site) &
+                             (site < np.maximum(sy, ty))).astype(np.int32) << index)
 
     source_x_zone = np.searchsorted(vertical_sites, sx).astype(np.int32)
     target_x_zone = np.searchsorted(vertical_sites, tx).astype(np.int32)
@@ -72,6 +81,36 @@ def main() -> None:
     y_zone_count = len(horizontal_sites) + 1
     source_zone = source_x_zone * y_zone_count + source_y_zone
     target_zone = target_x_zone * y_zone_count + target_y_zone
+
+    ordered_port_names = [name for name, _ in sorted(
+        ports.items(), key=lambda item: item[1])]
+    family_names = [re.sub(r"\[\d+\]$", "", name) for name in ordered_port_names]
+    family_ids = {name: index for index, name in enumerate(dict.fromkeys(family_names))}
+    family_by_port = np.asarray([family_ids[name] for name in family_names], dtype=np.int32)
+    lane_by_port = np.asarray([
+        int(match.group(1)) if (match := re.search(r"\[(\d+)\]$", name)) else 0
+        for name in ordered_port_names
+    ], dtype=np.int32)
+    source_family = family_by_port[source]
+    target_family = family_by_port[target]
+    source_lane = lane_by_port[source]
+    target_lane = lane_by_port[target]
+
+    source_y_mod100 = sy % 100
+    target_y_mod100 = ty % 100
+    midpoint_y_mod100 = midpoint_y % 100
+    source_y_band = sy // 50
+    target_y_band = ty // 50
+    source_x_side = np.where(sx < 76, 0, np.where(sx <= 89, 1, 2))
+    target_x_side = np.where(tx < 76, 0, np.where(tx <= 89, 1, 2))
+    crosses_central_column = (((sx < 76) & (tx > 89)) |
+                              ((tx < 76) & (sx > 89))).astype(np.int32)
+    source_open_distance = np.where(
+        source_y_mod100 >= 50, 0,
+        np.minimum(50 - source_y_mod100, source_y_mod100 + 1))
+    target_open_distance = np.where(
+        target_y_mod100 >= 50, 0,
+        np.minimum(50 - target_y_mod100, target_y_mod100 + 1))
 
     nearest_vertical_source = np.min(np.abs(sx[:, None] - vertical_sites[None, :]), axis=1)
     nearest_vertical_target = np.min(np.abs(tx[:, None] - vertical_sites[None, :]), axis=1)
@@ -90,6 +129,12 @@ def main() -> None:
         "source_nearest_vgap", "target_nearest_vgap",
         "source_nearest_hgap", "target_nearest_hgap",
         "dx_mod_10", "dy_mod_12",
+        "vertical_gap_mask", "horizontal_gap_mask",
+        "source_family", "target_family", "source_lane", "target_lane",
+        "source_y_mod100", "target_y_mod100", "midpoint_y_mod100",
+        "source_y_band", "target_y_band",
+        "source_x_side", "target_x_side", "crosses_central_column",
+        "source_open_distance", "target_open_distance",
     ]
     feature_columns = [
         estimate, sx, sy, tx, ty, dx, dy, abs_dx, abs_dy,
@@ -101,6 +146,12 @@ def main() -> None:
         nearest_vertical_source, nearest_vertical_target,
         nearest_horizontal_source, nearest_horizontal_target,
         abs_dx % 10, abs_dy % 12,
+        vertical_mask, horizontal_mask,
+        source_family, target_family, source_lane, target_lane,
+        source_y_mod100, target_y_mod100, midpoint_y_mod100,
+        source_y_band, target_y_band,
+        source_x_side, target_x_side, crosses_central_column,
+        source_open_distance, target_open_distance,
     ]
     if args.features:
         with args.features.open(encoding="utf-8") as handle:
@@ -124,6 +175,10 @@ def main() -> None:
         "source_port", "target_port", "direction", "block_mask",
         "source_x_zone", "source_y_zone", "target_x_zone", "target_y_zone",
         "source_zone", "target_zone", "dx_mod_10", "dy_mod_12",
+        "vertical_gap_mask", "horizontal_gap_mask",
+        "source_family", "target_family", "source_lane", "target_lane",
+        "source_y_band", "target_y_band", "source_x_side", "target_x_side",
+        "crosses_central_column",
     }
     categorical = [index for index, name in enumerate(names)
                    if name in categorical_names]
