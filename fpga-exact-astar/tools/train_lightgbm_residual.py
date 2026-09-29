@@ -20,6 +20,26 @@ from analyze_fast_estimator import architecture_ports, competition_score, load_r
 from analyze_generalization import block_mask, crossed_delay, deterministic_fold
 
 
+def smoothed_leave_one_out_encoding(
+        key: np.ndarray, target: np.ndarray, training: np.ndarray,
+        smoothing: float) -> np.ndarray:
+    """Encode a category using training labels without exposing its own label."""
+    key = key.astype(np.int64, copy=False)
+    size = int(key.max()) + 1
+    training_key = key[training]
+    training_target = target[training].astype(np.float64, copy=False)
+    count = np.bincount(training_key, minlength=size).astype(np.float64)
+    total = np.bincount(
+        training_key, weights=training_target, minlength=size).astype(np.float64)
+    global_mean = float(training_target.mean())
+
+    encoded = (total[key] + smoothing * global_mean) / (count[key] + smoothing)
+    encoded[training] = (
+        total[training_key] - training_target + smoothing * global_mean
+    ) / (count[training_key] - 1.0 + smoothing)
+    return encoded.astype(np.float32)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--golden", type=Path, required=True)
@@ -38,6 +58,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260929)
     parser.add_argument("--output-validation", type=Path,
                         help="optional compressed holdout predictions for ensembling")
+    parser.add_argument("--target-encoding", action="store_true",
+                        help="add leakage-safe category residual statistics")
     parser.add_argument("--base", choices=("calibrated", "raw"),
                         default="calibrated")
     args = parser.parse_args()
@@ -212,14 +234,37 @@ def main() -> None:
             feature_columns.pop(0)
     elif args.base == "raw":
         raise ValueError("--base raw requires --features")
-    features = np.column_stack(feature_columns).astype(np.float32)
-
     positive = (golden > 0) & (base_estimate > 0)
     fit_training = training & positive
     fit_validation = validation & positive
     target_residual = np.zeros(golden.size, dtype=np.float32)
     target_residual[positive] = np.log(
         golden[positive] / base_estimate[positive]).astype(np.float32)
+    if args.target_encoding:
+        port_count = len(ordered_port_names)
+        family_count = len(family_ids)
+        delay_bucket = np.minimum(base_estimate.astype(np.int64) // 64, 127)
+        encoding_specs = (
+            ("te_source_port", source, 20.0),
+            ("te_target_port", target, 20.0),
+            ("te_family_pair",
+             source_family * family_count + target_family, 12.0),
+            ("te_source_port_target_family",
+             source * family_count + target_family, 24.0),
+            ("te_source_family_target_port",
+             source_family * port_count + target, 24.0),
+            ("te_source_port_direction", source * 9 + sign, 18.0),
+            ("te_target_port_direction", target * 9 + sign, 18.0),
+            ("te_family_pair_direction",
+             (source_family * family_count + target_family) * 9 + sign, 24.0),
+            ("te_source_port_raw", source * 128 + delay_bucket, 32.0),
+            ("te_target_port_raw", target * 128 + delay_bucket, 32.0),
+        )
+        for name, key, smoothing in encoding_specs:
+            names.append(name)
+            feature_columns.append(smoothed_leave_one_out_encoding(
+                key, target_residual, fit_training, smoothing))
+    features = np.column_stack(feature_columns).astype(np.float32)
     categorical_names = {
         "source_port", "target_port", "direction", "block_mask",
         "source_x_zone", "source_y_zone", "target_x_zone", "target_y_zone",
@@ -288,6 +333,7 @@ def main() -> None:
     print(f"validation_fold={args.validation_fold}")
     print(f"base={args.base}")
     print(f"seed={args.seed}")
+    print(f"target_encoding={args.target_encoding}")
     print(f"best_iteration={model.best_iteration}")
     print(f"base_score={competition_score(golden[validation], base_estimate[validation]):.6f}")
     print(f"calibrated_score={competition_score(golden[validation], estimate[validation]):.6f}")
