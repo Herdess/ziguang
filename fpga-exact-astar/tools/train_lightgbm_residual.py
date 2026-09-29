@@ -35,6 +35,9 @@ def main() -> None:
     parser.add_argument("--leaves", type=int, default=48)
     parser.add_argument("--depth", type=int, default=8)
     parser.add_argument("--min-data", type=int, default=250)
+    parser.add_argument("--seed", type=int, default=20260929)
+    parser.add_argument("--output-validation", type=Path,
+                        help="optional compressed holdout predictions for ensembling")
     parser.add_argument("--base", choices=("calibrated", "raw"),
                         default="calibrated")
     args = parser.parse_args()
@@ -138,16 +141,6 @@ def main() -> None:
     target_open_distance = np.where(
         target_y_mod100 >= 50, 0,
         np.minimum(50 - target_y_mod100, target_y_mod100 + 1))
-    signed_dx_bucket = np.clip(np.floor_divide(dx, 5) + 24, 0, 47)
-    signed_dy_bucket = np.clip(np.floor_divide(dy, 10) + 55, 0, 109)
-    family_pair = source_family * len(family_ids) + target_family
-    source_port_direction = source * 9 + sign
-    target_port_direction = target * 9 + sign
-    source_port_dx = source * 48 + signed_dx_bucket
-    target_port_dx = target * 48 + signed_dx_bucket
-    source_port_dy = source * 110 + signed_dy_bucket
-    target_port_dy = target * 110 + signed_dy_bucket
-
     nearest_vertical_source = np.min(np.abs(sx[:, None] - vertical_sites[None, :]), axis=1)
     nearest_vertical_target = np.min(np.abs(tx[:, None] - vertical_sites[None, :]), axis=1)
     nearest_horizontal_source = np.min(np.abs(sy[:, None] - horizontal_sites[None, :]), axis=1)
@@ -174,8 +167,6 @@ def main() -> None:
         "source_y_band", "target_y_band",
         "source_x_side", "target_x_side", "crosses_central_column",
         "source_open_distance", "target_open_distance",
-        "family_pair", "source_port_direction", "target_port_direction",
-        "source_port_dx", "target_port_dx", "source_port_dy", "target_port_dy",
     ]
     feature_columns = [
         estimate, sx, sy, tx, ty, dx, dy, abs_dx, abs_dy,
@@ -199,8 +190,6 @@ def main() -> None:
         source_y_band, target_y_band,
         source_x_side, target_x_side, crosses_central_column,
         source_open_distance, target_open_distance,
-        family_pair, source_port_direction, target_port_direction,
-        source_port_dx, target_port_dx, source_port_dy, target_port_dy,
     ]
     base_estimate = estimate
     if args.features:
@@ -213,14 +202,6 @@ def main() -> None:
         names.extend(search_names)
         feature_columns.extend(search_features[:, index]
                                for index in range(search_features.shape[1]))
-        raw_delay_bucket = np.minimum(
-            search_features[:, search_names.index("search_raw")].astype(np.int32) // 64,
-            127)
-        names.extend(("source_port_raw", "target_port_raw"))
-        feature_columns.extend((
-            source * 128 + raw_delay_bucket,
-            target * 128 + raw_delay_bucket,
-        ))
         if args.base == "raw":
             base_estimate = search_features[:, search_names.index("search_raw")].astype(
                 np.int32)
@@ -250,9 +231,6 @@ def main() -> None:
         "source_bank", "target_bank", "source_suffix", "target_suffix",
         "source_y_band", "target_y_band", "source_x_side", "target_x_side",
         "crosses_central_column",
-        "family_pair", "source_port_direction", "target_port_direction",
-        "source_port_dx", "target_port_dx", "source_port_dy", "target_port_dy",
-        "source_port_raw", "target_port_raw",
     }
     categorical = [index for index, name in enumerate(names)
                    if name in categorical_names]
@@ -281,9 +259,9 @@ def main() -> None:
         "max_cat_threshold": 64,
         "max_bin": 127,
         "num_threads": 2,
-        "seed": 20260929,
-        "feature_fraction_seed": 20260929,
-        "bagging_seed": 20260929,
+        "seed": args.seed,
+        "feature_fraction_seed": args.seed,
+        "bagging_seed": args.seed,
         "verbosity": -1,
         "force_col_wise": True,
     }
@@ -309,6 +287,7 @@ def main() -> None:
                 golden[validation][nonzero])
     print(f"validation_fold={args.validation_fold}")
     print(f"base={args.base}")
+    print(f"seed={args.seed}")
     print(f"best_iteration={model.best_iteration}")
     print(f"base_score={competition_score(golden[validation], base_estimate[validation]):.6f}")
     print(f"calibrated_score={competition_score(golden[validation], estimate[validation]):.6f}")
@@ -319,6 +298,15 @@ def main() -> None:
     args.output_model.parent.mkdir(parents=True, exist_ok=True)
     model.save_model(str(args.output_model), num_iteration=model.best_iteration)
     print(f"model={args.output_model}")
+    if args.output_validation:
+        args.output_validation.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            args.output_validation,
+            row=np.flatnonzero(validation),
+            golden=golden[validation],
+            prediction=prediction,
+        )
+        print(f"validation_predictions={args.output_validation}")
 
 
 if __name__ == "__main__":

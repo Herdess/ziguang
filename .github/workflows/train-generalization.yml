@@ -14,6 +14,10 @@ on:
 jobs:
   train:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [20260929, 20260930, 20260931]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,11 +29,11 @@ jobs:
         run: |
           make clean
           make -j2 CXXFLAGS="-O3 -DNDEBUG -std=c++17 -Wall -Wextra"
-          mkdir -p build/model
+          mkdir -p build/model/${{ matrix.seed }}
           ./estimate --no-public-cache --no-repeat-accel \
-            --feature-output build/model/search_features.csv \
+            --feature-output build/model/${{ matrix.seed }}/search_features.csv \
             -in data/delay_estimate_ans.csv \
-            -out build/model/baseline_no_cache_1m.csv
+            -out build/model/${{ matrix.seed }}/baseline_no_cache_1m.csv
 
       - name: Train architecture-aware residual model
         working-directory: fpga-exact-astar
@@ -37,21 +41,48 @@ jobs:
           set -o pipefail
           python3 tools/train_lightgbm_residual.py \
             --golden data/delay_estimate_ans.csv \
-            --estimate build/model/baseline_no_cache_1m.csv \
-            --features build/model/search_features.csv \
+            --estimate build/model/${{ matrix.seed }}/baseline_no_cache_1m.csv \
+            --features build/model/${{ matrix.seed }}/search_features.csv \
             --base "${{ inputs.base }}" \
-            --output-model build/model/generalization_model.txt \
-            --rounds 4000 \
+            --seed ${{ matrix.seed }} \
+            --output-model build/model/${{ matrix.seed }}/generalization_model.txt \
+            --output-validation build/model/${{ matrix.seed }}/validation_predictions.npz \
+            --rounds 3000 \
             --leaves 48 \
             --depth 8 \
             --min-data 250 \
-            | tee build/model/training_report.txt
+            | tee build/model/${{ matrix.seed }}/training_report.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: generalization-model-${{ inputs.base }}
+          name: generalization-model-${{ inputs.base }}-${{ matrix.seed }}
           path: |
-            fpga-exact-astar/build/model/generalization_model.txt
-            fpga-exact-astar/build/model/training_report.txt
+            fpga-exact-astar/build/model/${{ matrix.seed }}/generalization_model.txt
+            fpga-exact-astar/build/model/${{ matrix.seed }}/training_report.txt
+            fpga-exact-astar/build/model/${{ matrix.seed }}/validation_predictions.npz
           if-no-files-found: error
           retention-days: 30
+
+  ensemble:
+    needs: train
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: generalization-model-${{ inputs.base }}-*
+          path: downloaded-models
+
+      - name: Score strict-holdout ensemble
+        working-directory: fpga-exact-astar
+        run: |
+          python3 tools/evaluate_prediction_ensemble.py \
+            ../downloaded-models/*/validation_predictions.npz \
+            | tee ensemble_report.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generalization-ensemble-report-${{ inputs.base }}
+          path: fpga-exact-astar/ensemble_report.txt
+          if-no-files-found: error
