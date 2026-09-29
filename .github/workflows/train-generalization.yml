@@ -10,6 +10,10 @@ on:
           - calibrated
           - raw
         default: calibrated
+      target_encoding:
+        description: Add leakage-safe categorical residual statistics
+        type: boolean
+        default: false
 
 jobs:
   train:
@@ -39,6 +43,10 @@ jobs:
         working-directory: fpga-exact-astar
         run: |
           set -o pipefail
+          TARGET_ENCODING_ARG=""
+          if [ "${{ inputs.target_encoding }}" = "true" ]; then
+            TARGET_ENCODING_ARG="--target-encoding"
+          fi
           python3 tools/train_lightgbm_residual.py \
             --golden data/delay_estimate_ans.csv \
             --estimate build/model/${{ matrix.seed }}/baseline_no_cache_1m.csv \
@@ -51,6 +59,7 @@ jobs:
             --leaves 48 \
             --depth 8 \
             --min-data 250 \
+            $TARGET_ENCODING_ARG \
             | tee build/model/${{ matrix.seed }}/training_report.txt
 
       - uses: actions/upload-artifact@v4
@@ -74,9 +83,13 @@ jobs:
           pattern: generalization-model-${{ inputs.base }}-*
           path: downloaded-models
 
+      - name: Install evaluation dependency
+        run: python3 -m pip install --disable-pip-version-check numpy
+
       - name: Score strict-holdout ensemble
         working-directory: fpga-exact-astar
         run: |
+          set -o pipefail
           python3 tools/evaluate_prediction_ensemble.py \
             ../downloaded-models/*/validation_predictions.npz \
             | tee ensemble_report.txt
