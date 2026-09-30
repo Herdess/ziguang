@@ -14,7 +14,9 @@ permissions:
 
 jobs:
   build-and-smoke-test:
-    runs-on: ubuntu-latest
+    # Keep the runtime ABI close to the organizer/reference executable. Newer runners
+    # can introduce GLIBC_2.38 and GLIBCXX_3.4.32 dependencies.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     defaults:
       run:
