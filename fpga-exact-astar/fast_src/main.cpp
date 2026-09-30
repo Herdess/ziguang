@@ -358,7 +358,7 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        constexpr size_t kIoBufferSize = 4U * 1024U * 1024U;
+        constexpr size_t kIoBufferSize = 16U * 1024U * 1024U;
         std::vector<char> input_io_buffer(kIoBufferSize);
         std::vector<char> output_io_buffer(kIoBufferSize);
         std::ifstream input;
@@ -418,6 +418,34 @@ int main(int argc, char** argv) {
         const std::streampos data_start = input.tellg();
         constexpr std::string_view output_header = "From,To,delay\n";
         output.write(output_header.data(), static_cast<std::streamsize>(output_header.size()));
+        constexpr size_t kOutputChunkSize = 8U * 1024U * 1024U;
+        std::string output_chunk;
+        output_chunk.reserve(kOutputChunkSize + 256U);
+        auto flush_output_chunk = [&] {
+            if (output_chunk.empty()) return;
+            output.write(output_chunk.data(),
+                         static_cast<std::streamsize>(output_chunk.size()));
+            output_chunk.clear();
+        };
+        auto append_output_row = [&](std::string_view from, std::string_view to,
+                                     uint32_t delay) {
+            output_chunk.append(from);
+            output_chunk.push_back(',');
+            output_chunk.append(to);
+            output_chunk.push_back(',');
+            if (delay == srb::kInfinity) {
+                output_chunk.append("-1");
+            } else {
+                char delay_buffer[16];
+                const auto converted = std::to_chars(
+                    delay_buffer, delay_buffer + sizeof(delay_buffer), delay);
+                output_chunk.append(
+                    delay_buffer,
+                    static_cast<size_t>(converted.ptr - delay_buffer));
+            }
+            output_chunk.push_back('\n');
+            if (output_chunk.size() >= kOutputChunkSize) flush_output_chunk();
+        };
 
         uint64_t rows = 0;
         uint64_t unreachable = 0;
@@ -549,14 +577,8 @@ int main(int argc, char** argv) {
                     stats.heuristic_evaluations += local.heuristic_evaluations;
                 }
                 for (const ParallelRow& item : batch) {
-                    output << item.from << ',' << item.to << ',';
-                    if (item.delay == srb::kInfinity) {
-                        output << -1;
-                        ++unreachable;
-                    } else {
-                        output << item.delay;
-                    }
-                    output.put('\n');
+                    append_output_row(item.from, item.to, item.delay);
+                    if (item.delay == srb::kInfinity) ++unreachable;
                 }
                 rows += batch.size();
                 if (options.progress != 0 && rows >= next_progress) {
@@ -607,10 +629,6 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            output.write(from_text.data(), static_cast<std::streamsize>(from_text.size()));
-            output.put(',');
-            output.write(to_text.data(), static_cast<std::streamsize>(to_text.size()));
-            output.put(',');
             if (repeat_candidate && rows < kPublicBlockRows) {
                 first_output_block.append(from_text);
                 first_output_block.push_back(',');
@@ -618,7 +636,6 @@ int main(int argc, char** argv) {
                 first_output_block.push_back(',');
             }
             if (delay == srb::kInfinity) {
-                output.write("-1", 2);
                 if (repeat_candidate && rows < kPublicBlockRows) {
                     first_output_block.append("-1");
                 }
@@ -627,14 +644,12 @@ int main(int argc, char** argv) {
                 char delay_buffer[16];
                 const auto converted = std::to_chars(
                     delay_buffer, delay_buffer + sizeof(delay_buffer), delay);
-                output.write(delay_buffer,
-                             static_cast<std::streamsize>(converted.ptr - delay_buffer));
                 if (repeat_candidate && rows < kPublicBlockRows) {
                     first_output_block.append(
                         delay_buffer, static_cast<size_t>(converted.ptr - delay_buffer));
                 }
             }
-            output.put('\n');
+            append_output_row(from_text, to_text, delay);
             if (repeat_candidate && rows < kPublicBlockRows) {
                 first_output_block.push_back('\n');
             }
@@ -708,6 +723,7 @@ int main(int argc, char** argv) {
                         const bool last_matches = matches_at(
                             file_end - static_cast<std::streamoff>(block_bytes));
                         if (second_matches && last_matches) {
+                            flush_output_chunk();
                             const uint64_t repeated_blocks = remaining / block_bytes;
                             for (uint64_t block = 0; block < repeated_blocks; ++block) {
                                 output.write(first_output_block.data(),
@@ -732,6 +748,7 @@ int main(int argc, char** argv) {
                           << " avg_us=" << (elapsed * 1e6 / rows) << '\n';
             }
         }
+        flush_output_chunk();
         output.close();
         if (!output) throw std::runtime_error("failed while writing output " + options.output.string());
         if (!options.path_output.empty()) {

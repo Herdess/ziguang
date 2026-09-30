@@ -33,6 +33,13 @@ jobs:
           ./estimate --solver verify -in examples/delay_estimate_request.csv -out build/verify_result.csv
           diff -u examples/delay_estimate_result.expected.csv build/verify_result.csv
 
+      - name: Verify prediction-cache capacity
+        working-directory: fpga-exact-astar
+        run: |
+          cmake -S . -B build-cache-test -DBUILD_TESTING=ON
+          cmake --build build-cache-test --target prediction_cache_test -j2
+          ctest --test-dir build-cache-test --output-on-failure -R prediction_cache_2m
+
       - name: Assemble submission
         working-directory: fpga-exact-astar
         run: |
@@ -40,6 +47,7 @@ jobs:
           install -m 755 estimate submission/bin/estimate
           (cd submission && zip -9 -r ../submission.zip bin)
           unzip -l submission.zip
+          test $(stat -c%s submission.zip) -le 104857600
           sha256sum estimate submission.zip
 
       - uses: actions/upload-artifact@v4

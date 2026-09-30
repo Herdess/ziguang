@@ -12,7 +12,7 @@ namespace srb {
 // It stores no Golden labels: a miss is always evaluated by the active model.
 class PredictionCache {
 public:
-    explicit PredictionCache(uint32_t port_count, size_t capacity_power = 21);
+    explicit PredictionCache(uint32_t port_count, size_t capacity_power = 22);
 
     bool lookup(const Pin& source, const Pin& target, uint32_t& delay) const;
     void insert(const Pin& source, const Pin& target, uint32_t delay);
