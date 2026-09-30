@@ -114,6 +114,9 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--workers") {
             const uint64_t parsed = parse_u64(value(arg), arg);
             if (parsed > 1) {
+                throw std::runtime_error(
+                    "--workers above 1 is not allowed by the competition single-thread rule");
+            }
             options.workers = static_cast<uint32_t>(parsed);
         }
         else if (arg == "--margin") {
