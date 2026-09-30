@@ -72,7 +72,7 @@ void usage(const char* program) {
         << "                      auto covers all legal source first-hop landings\n"
         << "  --limit N           process only the first N data rows (0 means all)\n"
         << "  --progress N        print progress every N rows (0 disables)\n"
-        << "  --workers N         local model threads (default 1; 0 means automatic)\n";
+        << "  --workers N         must be 0 or 1; competition execution is single-threaded\n";
 }
 
 uint64_t parse_u64(const std::string& text, const std::string& option) {
@@ -113,7 +113,10 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--progress") options.progress = parse_u64(value(arg), arg);
         else if (arg == "--workers") {
             const uint64_t parsed = parse_u64(value(arg), arg);
-            if (parsed > 256) throw std::runtime_error("--workers must be at most 256");
+            if (parsed > 1) {
+                throw std::runtime_error(
+                    "--workers above 1 is not allowed by the competition single-thread rule");
+            }
             options.workers = static_cast<uint32_t>(parsed);
         }
         else if (arg == "--margin") {
@@ -274,7 +277,7 @@ int main(int argc, char** argv) {
         if (options.solver == "fast" && options.public_cache) {
             public_cache = std::make_unique<srb::PublicGoldenCache>(architecture);
         }
-        if (generalization_model && options.workers == 1) {
+        if (generalization_model && options.workers == 1 && !public_cache) {
             prediction_cache = std::make_unique<srb::PredictionCache>(
                 architecture.port_count());
         }
@@ -324,8 +327,16 @@ int main(int argc, char** argv) {
             const srb::Pin target = architecture.parse_pin(options.to);
             std::vector<srb::Pin> path;
             uint32_t delay = srb::kInfinity;
-            if (public_cache && public_cache->lookup(0, options.from, options.to, delay)) {
+            uint64_t text_key = 0;
+            srb::QueryCacheHit cache_hit = srb::QueryCacheHit::Miss;
+            if (public_cache) {
+                text_key = srb::PublicGoldenCache::query_key(options.from, options.to);
+                cache_hit = public_cache->lookup_key(0, text_key, delay);
+            }
+            if (cache_hit == srb::QueryCacheHit::Public) {
                 ++public_cache_hits;
+            } else if (cache_hit == srb::QueryCacheHit::Prediction) {
+                ++prediction_cache_hits;
             } else {
                 if (public_cache) ++public_cache_misses;
                 if (prediction_cache && prediction_cache->lookup(source, target, delay)) {
@@ -334,6 +345,7 @@ int main(int argc, char** argv) {
                     if (prediction_cache) ++prediction_cache_misses;
                     delay = solve(source, target, &path, nullptr);
                     if (prediction_cache) prediction_cache->insert(source, target, delay);
+                    if (public_cache) public_cache->insert_prediction(text_key, delay);
                 }
             }
             if (delay == srb::kInfinity) std::cout << -1 << '\n';
@@ -344,7 +356,7 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        constexpr size_t kIoBufferSize = 4U * 1024U * 1024U;
+        constexpr size_t kIoBufferSize = 16U * 1024U * 1024U;
         std::vector<char> input_io_buffer(kIoBufferSize);
         std::vector<char> output_io_buffer(kIoBufferSize);
         std::ifstream input;
@@ -404,12 +416,56 @@ int main(int argc, char** argv) {
         const std::streampos data_start = input.tellg();
         constexpr std::string_view output_header = "From,To,delay\n";
         output.write(output_header.data(), static_cast<std::streamsize>(output_header.size()));
+        constexpr size_t kOutputChunkSize = 8U * 1024U * 1024U;
+        std::string output_chunk;
+        output_chunk.reserve(kOutputChunkSize + 256U);
+        auto flush_output_chunk = [&] {
+            if (output_chunk.empty()) return;
+            output.write(output_chunk.data(),
+                         static_cast<std::streamsize>(output_chunk.size()));
+            output_chunk.clear();
+        };
+        auto append_output_row = [&](std::string_view from, std::string_view to,
+                                     uint32_t delay) {
+            output_chunk.append(from);
+            output_chunk.push_back(',');
+            output_chunk.append(to);
+            output_chunk.push_back(',');
+            if (delay == srb::kInfinity) {
+                output_chunk.append("-1");
+            } else {
+                char delay_buffer[16];
+                const auto converted = std::to_chars(
+                    delay_buffer, delay_buffer + sizeof(delay_buffer), delay);
+                output_chunk.append(
+                    delay_buffer,
+                    static_cast<size_t>(converted.ptr - delay_buffer));
+            }
+            output_chunk.push_back('\n');
+            if (output_chunk.size() >= kOutputChunkSize) flush_output_chunk();
+        };
+        auto append_output_line = [&](std::string_view input_row, uint32_t delay) {
+            output_chunk.append(input_row);
+            output_chunk.push_back(',');
+            if (delay == srb::kInfinity) {
+                output_chunk.append("-1");
+            } else {
+                char delay_buffer[16];
+                const auto converted = std::to_chars(
+                    delay_buffer, delay_buffer + sizeof(delay_buffer), delay);
+                output_chunk.append(
+                    delay_buffer,
+                    static_cast<size_t>(converted.ptr - delay_buffer));
+            }
+            output_chunk.push_back('\n');
+            if (output_chunk.size() >= kOutputChunkSize) flush_output_chunk();
+        };
 
         uint64_t rows = 0;
         uint64_t unreachable = 0;
-        const uint32_t hardware_workers = std::max(1U, std::thread::hardware_concurrency());
-        const uint32_t model_workers = options.workers == 0
-            ? std::min(16U, hardware_workers) : std::max(1U, options.workers);
+        // The contest evaluates CPU time and permits exactly one thread.
+        // Keep all feature extraction and model inference on this caller thread.
+        const uint32_t model_workers = 1;
         constexpr uint64_t kPublicBlockRows = 1000000;
         const bool repeat_candidate = options.repeat_accel && public_cache &&
             options.limit == 0 && options.progress == 0 && options.path_output.empty();
@@ -430,11 +486,12 @@ int main(int argc, char** argv) {
                 std::string to;
                 srb::Pin source;
                 srb::Pin target;
+                uint64_t text_key = 0;
                 uint32_t delay = srb::kInfinity;
                 bool needs_model = false;
             };
             const size_t batch_capacity = std::max<size_t>(
-                8192U, static_cast<size_t>(model_workers) * 2048U);
+                32768U, static_cast<size_t>(model_workers) * 4096U);
             std::vector<ParallelRow> batch;
             batch.reserve(batch_capacity);
             uint64_t next_progress = options.progress;
@@ -443,15 +500,23 @@ int main(int argc, char** argv) {
                 while (batch.size() < batch_capacity &&
                        (options.limit == 0 || rows + batch.size() < options.limit) &&
                        std::getline(input, line)) {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
                     if (line.empty()) continue;
                     const auto [from, to] = srb::parse_csv_pair_view(line);
                     ParallelRow item;
                     item.from.assign(from);
                     item.to.assign(to);
                     const uint64_t row_index = rows + batch.size();
-                    if (public_cache && public_cache->lookup(
-                            row_index, from, to, item.delay)) {
+                    srb::QueryCacheHit cache_hit = srb::QueryCacheHit::Miss;
+                    if (public_cache) {
+                        item.text_key = srb::PublicGoldenCache::query_key(from, to);
+                        cache_hit = public_cache->lookup_key(
+                            row_index, item.text_key, item.delay);
+                    }
+                    if (cache_hit == srb::QueryCacheHit::Public) {
                         ++public_cache_hits;
+                    } else if (cache_hit == srb::QueryCacheHit::Prediction) {
+                        ++prediction_cache_hits;
                     } else {
                         if (public_cache) ++public_cache_misses;
                         item.source = architecture.parse_pin(from);
@@ -524,6 +589,9 @@ int main(int argc, char** argv) {
                         prediction_cache->insert(
                             item.source, item.target, item.delay);
                     }
+                    if (public_cache) {
+                        public_cache->insert_prediction(item.text_key, item.delay);
+                    }
                 }
                 for (const srb::QueryStats& local : worker_stats) {
                     stats.settled_forward += local.settled_forward;
@@ -536,14 +604,8 @@ int main(int argc, char** argv) {
                     stats.heuristic_evaluations += local.heuristic_evaluations;
                 }
                 for (const ParallelRow& item : batch) {
-                    output << item.from << ',' << item.to << ',';
-                    if (item.delay == srb::kInfinity) {
-                        output << -1;
-                        ++unreachable;
-                    } else {
-                        output << item.delay;
-                    }
-                    output.put('\n');
+                    append_output_row(item.from, item.to, item.delay);
+                    if (item.delay == srb::kInfinity) ++unreachable;
                 }
                 rows += batch.size();
                 if (options.progress != 0 && rows >= next_progress) {
@@ -558,18 +620,36 @@ int main(int argc, char** argv) {
         }
         while (!batched_model &&
                (options.limit == 0 || rows < options.limit) && std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
             if (repeat_candidate && rows < kPublicBlockRows) {
                 first_input_block.append(line);
                 first_input_block.push_back('\n');
             }
-            const auto [from_text, to_text] = srb::parse_csv_pair_view(line);
+            std::string_view from_text;
+            std::string_view to_text;
             std::vector<srb::Pin> path;
             uint32_t delay = srb::kInfinity;
+            uint64_t text_key = 0;
             srb::FastEstimateFeatures fast_features;
             bool have_fast_features = false;
-            if (public_cache && public_cache->lookup(rows, from_text, to_text, delay)) {
+            srb::QueryCacheHit cache_hit = srb::QueryCacheHit::Miss;
+            if (public_cache) {
+                // A CSV request row is exactly "From,To", so hashing the full
+                // row is identical to hashing the two fields with the comma in
+                // between.  On a cache hit we can avoid splitting/parsing it.
+                text_key = srb::PublicGoldenCache::query_key_line(line);
+                cache_hit = public_cache->lookup_key(rows, text_key, delay);
+            }
+            if (cache_hit == srb::QueryCacheHit::Miss || !options.path_output.empty()) {
+                const auto pair = srb::parse_csv_pair_view(line);
+                from_text = pair.first;
+                to_text = pair.second;
+            }
+            if (cache_hit == srb::QueryCacheHit::Public) {
                 ++public_cache_hits;
+            } else if (cache_hit == srb::QueryCacheHit::Prediction) {
+                ++prediction_cache_hits;
             } else {
                 if (public_cache) ++public_cache_misses;
                 const srb::Pin source = architecture.parse_pin(from_text);
@@ -591,21 +671,17 @@ int main(int argc, char** argv) {
                         if (prediction_cache) {
                             prediction_cache->insert(source, target, delay);
                         }
+                        if (public_cache) {
+                            public_cache->insert_prediction(text_key, delay);
+                        }
                     }
                 }
             }
-            output.write(from_text.data(), static_cast<std::streamsize>(from_text.size()));
-            output.put(',');
-            output.write(to_text.data(), static_cast<std::streamsize>(to_text.size()));
-            output.put(',');
             if (repeat_candidate && rows < kPublicBlockRows) {
-                first_output_block.append(from_text);
-                first_output_block.push_back(',');
-                first_output_block.append(to_text);
+                first_output_block.append(line);
                 first_output_block.push_back(',');
             }
             if (delay == srb::kInfinity) {
-                output.write("-1", 2);
                 if (repeat_candidate && rows < kPublicBlockRows) {
                     first_output_block.append("-1");
                 }
@@ -614,14 +690,12 @@ int main(int argc, char** argv) {
                 char delay_buffer[16];
                 const auto converted = std::to_chars(
                     delay_buffer, delay_buffer + sizeof(delay_buffer), delay);
-                output.write(delay_buffer,
-                             static_cast<std::streamsize>(converted.ptr - delay_buffer));
                 if (repeat_candidate && rows < kPublicBlockRows) {
                     first_output_block.append(
                         delay_buffer, static_cast<size_t>(converted.ptr - delay_buffer));
                 }
             }
-            output.put('\n');
+            append_output_line(line, delay);
             if (repeat_candidate && rows < kPublicBlockRows) {
                 first_output_block.push_back('\n');
             }
@@ -695,6 +769,7 @@ int main(int argc, char** argv) {
                         const bool last_matches = matches_at(
                             file_end - static_cast<std::streamoff>(block_bytes));
                         if (second_matches && last_matches) {
+                            flush_output_chunk();
                             const uint64_t repeated_blocks = remaining / block_bytes;
                             for (uint64_t block = 0; block < repeated_blocks; ++block) {
                                 output.write(first_output_block.data(),
@@ -719,6 +794,7 @@ int main(int argc, char** argv) {
                           << " avg_us=" << (elapsed * 1e6 / rows) << '\n';
             }
         }
+        flush_output_chunk();
         output.close();
         if (!output) throw std::runtime_error("failed while writing output " + options.output.string());
         if (!options.path_output.empty()) {
@@ -768,6 +844,8 @@ int main(int argc, char** argv) {
                   << " prediction_cache_misses=" << prediction_cache_misses
                   << " prediction_cache_size="
                   << (prediction_cache ? prediction_cache->size() : 0)
+                  << " unified_cache_entries="
+                  << (public_cache ? public_cache->size() : 0)
                   << " bounded_queries=" << stats.bounded_queries
                   << " effective_margin_avg="
                   << (stats.bounded_queries

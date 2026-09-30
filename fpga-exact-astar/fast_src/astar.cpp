@@ -216,4 +216,3 @@ void ExactAStar::discard_stale() {
 }
 
 }  // namespace srb
-

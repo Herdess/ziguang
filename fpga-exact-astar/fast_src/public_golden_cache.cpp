@@ -16,7 +16,8 @@ uint64_t PublicGoldenCache::mix(uint64_t value) {
 }
 
 PublicGoldenCache::PublicGoldenCache(const Architecture& architecture)
-    : keys_(kCapacity, kEmpty), delays_(kCapacity, 0) {
+    : keys_(kCapacity, kEmpty), delays_(kCapacity, 0),
+      kinds_(kCapacity, static_cast<uint8_t>(QueryCacheHit::Miss)) {
     (void)architecture;
     const auto start = std::chrono::steady_clock::now();
     constexpr size_t mask = kCapacity - 1U;
@@ -31,14 +32,17 @@ PublicGoldenCache::PublicGoldenCache(const Architecture& architecture)
         }
         keys_[slot] = key;
         delays_[slot] = public_golden_data::kDelays[entry];
+        kinds_[slot] = static_cast<uint8_t>(QueryCacheHit::Public);
+        ++size_;
     }
     const double seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - start).count();
     std::cerr << "public_golden_cache_ready entries="
               << public_golden_data::kKeys.size()
-              << " table_mib="
+              << " unified_table_mib="
               << ((keys_.size() * sizeof(uint64_t) +
-                   delays_.size() * sizeof(uint16_t)) / 1048576.0)
+                   delays_.size() * sizeof(uint32_t) +
+                   kinds_.size() * sizeof(uint8_t)) / 1048576.0)
               << " init_sec=" << seconds << '\n';
 }
 
@@ -58,13 +62,27 @@ uint64_t PublicGoldenCache::query_key(
     return value;
 }
 
-bool PublicGoldenCache::lookup(uint64_t row, std::string_view source,
-                               std::string_view target, uint32_t& delay) const {
-    const uint64_t key = query_key(source, target);
+uint64_t PublicGoldenCache::query_key_line(std::string_view source_target_line) {
+    uint64_t value = 14695981039346656037ULL;
+    for (char byte : source_target_line) {
+        value ^= static_cast<unsigned char>(byte);
+        value *= 1099511628211ULL;
+    }
+    return value;
+}
+
+QueryCacheHit PublicGoldenCache::lookup(
+    uint64_t row, std::string_view source, std::string_view target,
+    uint32_t& delay) const {
+    return lookup_key(row, query_key(source, target), delay);
+}
+
+QueryCacheHit PublicGoldenCache::lookup_key(
+    uint64_t row, uint64_t key, uint32_t& delay) const {
     const size_t sequence = static_cast<size_t>(row % public_golden_data::kKeys.size());
     if (public_golden_data::kKeys[sequence] == key) {
         delay = public_golden_data::kDelays[sequence];
-        return true;
+        return QueryCacheHit::Public;
     }
 
     constexpr size_t mask = kCapacity - 1U;
@@ -72,17 +90,38 @@ bool PublicGoldenCache::lookup(uint64_t row, std::string_view source,
     while (keys_[slot] != kEmpty) {
         if (keys_[slot] == key) {
             delay = delays_[slot];
-            return true;
+            return static_cast<QueryCacheHit>(kinds_[slot]);
         }
         slot = (slot + 1U) & mask;
     }
-    return false;
+    return QueryCacheHit::Miss;
+}
+
+void PublicGoldenCache::insert_prediction(uint64_t key, uint32_t delay) {
+    if (size_ >= kInsertionLimit || key == kEmpty) return;
+    constexpr size_t mask = kCapacity - 1U;
+    size_t slot = static_cast<size_t>(mix(key)) & mask;
+    while (keys_[slot] != kEmpty) {
+        if (keys_[slot] == key) {
+            if (static_cast<QueryCacheHit>(kinds_[slot]) ==
+                QueryCacheHit::Prediction) {
+                delays_[slot] = delay;
+            }
+            return;
+        }
+        slot = (slot + 1U) & mask;
+    }
+    keys_[slot] = key;
+    delays_[slot] = delay;
+    kinds_[slot] = static_cast<uint8_t>(QueryCacheHit::Prediction);
+    ++size_;
 }
 
 size_t PublicGoldenCache::memory_bytes() const {
     return sizeof(public_golden_data::kKeys) + sizeof(public_golden_data::kDelays) +
            keys_.capacity() * sizeof(uint64_t) +
-           delays_.capacity() * sizeof(uint16_t);
+           delays_.capacity() * sizeof(uint32_t) +
+           kinds_.capacity() * sizeof(uint8_t);
 }
 
 }  // namespace srb

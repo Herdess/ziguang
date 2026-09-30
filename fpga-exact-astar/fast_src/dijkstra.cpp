@@ -445,4 +445,3 @@ void BidirectionalDijkstra::discard_stale_backward() {
 }
 
 }  // namespace srb
-

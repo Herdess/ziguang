@@ -22,8 +22,21 @@ target_include_directories(estimate PRIVATE fast_src)
 find_package(Threads REQUIRED)
 target_link_libraries(estimate PRIVATE Threads::Threads)
 
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(prediction_cache_test
+        tests/prediction_cache_test.cpp
+        fast_src/prediction_cache.cpp
+    )
+    target_include_directories(prediction_cache_test PRIVATE fast_src)
+    add_test(NAME prediction_cache_2m COMMAND prediction_cache_test)
+endif()
+
 if(MSVC)
     target_compile_options(estimate PRIVATE /O2 /W4)
 else()
     target_compile_options(estimate PRIVATE -O3 -Wall -Wextra)
+    if(BUILD_TESTING)
+        target_compile_options(prediction_cache_test PRIVATE -O3 -Wall -Wextra)
+    endif()
 endif()

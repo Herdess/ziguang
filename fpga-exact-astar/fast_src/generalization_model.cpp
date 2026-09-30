@@ -404,35 +404,40 @@ void GeneralizationModel::predict_batch(
     if (row_count == 0) return;
     workers = std::max<uint32_t>(1, std::min<uint32_t>(
         workers, static_cast<uint32_t>(row_count)));
+    auto predict_range = [&](size_t begin, size_t end) {
+        std::vector<double> residual(end - begin, 0.0);
+        // Tree-major traversal keeps each tree's nodes and categorical
+        // bitmaps hot while preserving tree-order summation per row.
+        for (uint32_t root : roots_) {
+            for (size_t row = begin; row < end; ++row) {
+                residual[row - begin] += predict_tree(root, features[row]);
+            }
+        }
+        for (size_t row = begin; row < end; ++row) {
+            if (raw[row] == 0 || raw[row] == kInfinity) {
+                output[row] = raw[row];
+                continue;
+            }
+            const double corrected = static_cast<double>(raw[row]) *
+                std::exp(residual[row - begin]);
+            if (!(corrected > 0.0)) output[row] = 0;
+            else if (corrected >= std::numeric_limits<uint32_t>::max()) {
+                output[row] = std::numeric_limits<uint32_t>::max();
+            } else {
+                output[row] = static_cast<uint32_t>(std::nearbyint(corrected));
+            }
+        }
+    };
+    if (workers == 1) {
+        predict_range(0, row_count);
+        return;
+    }
     std::vector<std::thread> threads;
     threads.reserve(workers);
     for (uint32_t worker = 0; worker < workers; ++worker) {
         const size_t begin = row_count * worker / workers;
         const size_t end = row_count * (worker + 1U) / workers;
-        threads.emplace_back([&, begin, end] {
-            std::vector<double> residual(end - begin, 0.0);
-            // Tree-major traversal keeps each tree's nodes and categorical
-            // bitmaps hot while preserving tree-order summation per row.
-            for (uint32_t root : roots_) {
-                for (size_t row = begin; row < end; ++row) {
-                    residual[row - begin] += predict_tree(root, features[row]);
-                }
-            }
-            for (size_t row = begin; row < end; ++row) {
-                if (raw[row] == 0 || raw[row] == kInfinity) {
-                    output[row] = raw[row];
-                    continue;
-                }
-                const double corrected = static_cast<double>(raw[row]) *
-                    std::exp(residual[row - begin]);
-                if (!(corrected > 0.0)) output[row] = 0;
-                else if (corrected >= std::numeric_limits<uint32_t>::max()) {
-                    output[row] = std::numeric_limits<uint32_t>::max();
-                } else {
-                    output[row] = static_cast<uint32_t>(std::nearbyint(corrected));
-                }
-            }
-        });
+        threads.emplace_back(predict_range, begin, end);
     }
     for (std::thread& thread : threads) thread.join();
 }

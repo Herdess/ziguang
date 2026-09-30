@@ -127,9 +127,17 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--verify-rows", type=int, default=128)
     parser.add_argument("--storage", choices=("compact", "bitmap"), default="compact")
+    parser.add_argument(
+        "--trees", type=int, default=0,
+        help="retain the first N trees (0 retains the complete model)")
     args = parser.parse_args()
 
     model = lgb.Booster(model_file=str(args.input_model))
+    if args.trees:
+        if args.trees < 1 or args.trees > model.num_trees():
+            raise ValueError(
+                f"--trees must be in [1, {model.num_trees()}], got {args.trees}")
+        model = lgb.Booster(model_str=model.model_to_string(num_iteration=args.trees))
     feature_names, roots, nodes, leaves, category_data = build_compact(
         model, args.storage)
     write_binary(

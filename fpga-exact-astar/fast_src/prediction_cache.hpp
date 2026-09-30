@@ -12,7 +12,11 @@ namespace srb {
 // It stores no Golden labels: a miss is always evaluated by the active model.
 class PredictionCache {
 public:
-    explicit PredictionCache(uint32_t port_count, size_t capacity_power = 21);
+    // 2^22 slots with the 70% load limit retain about 2.93 million
+    // distinct unseen predictions.  The previous 2^21 table stopped at
+    // about 1.46 million entries and repeatedly evaluated evicted-by-limit
+    // queries after the official base set was expanded.
+    explicit PredictionCache(uint32_t port_count, size_t capacity_power = 22);
 
     bool lookup(const Pin& source, const Pin& target, uint32_t& delay) const;
     void insert(const Pin& source, const Pin& target, uint32_t delay);

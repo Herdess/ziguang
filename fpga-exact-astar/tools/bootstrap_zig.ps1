@@ -34,4 +34,3 @@ if (-not (Test-Path -LiteralPath $ZigExe)) {
 }
 Remove-Item -LiteralPath $Archive -Force
 Write-Host "Installed Zig $Version in $InstallDir"
-
