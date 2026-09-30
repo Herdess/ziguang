@@ -37,7 +37,7 @@ struct Options {
     fs::path generalization_model;
     uint64_t limit = 0;
     uint64_t progress = 0;
-    uint32_t workers = 1;
+    uint32_t workers = 0;
     srb::DelayMode mode = srb::DelayMode::Exact;
     srb::MarginConfig margin;
     std::string solver = "fast";
@@ -72,7 +72,7 @@ void usage(const char* program) {
         << "                      auto covers all legal source first-hop landings\n"
         << "  --limit N           process only the first N data rows (0 means all)\n"
         << "  --progress N        print progress every N rows (0 disables)\n"
-        << "  --workers N         local model threads (default 1; 0 means automatic)\n";
+        << "  --workers N         local model threads (default automatic; 0 means automatic)\n";
 }
 
 uint64_t parse_u64(const std::string& text, const std::string& option) {
@@ -451,7 +451,7 @@ int main(int argc, char** argv) {
         uint64_t unreachable = 0;
         const uint32_t hardware_workers = std::max(1U, std::thread::hardware_concurrency());
         const uint32_t model_workers = options.workers == 0
-            ? std::min(16U, hardware_workers) : std::max(1U, options.workers);
+            ? std::min(8U, hardware_workers) : std::max(1U, options.workers);
         constexpr uint64_t kPublicBlockRows = 1000000;
         const bool repeat_candidate = options.repeat_accel && public_cache &&
             options.limit == 0 && options.progress == 0 && options.path_output.empty();
@@ -476,7 +476,7 @@ int main(int argc, char** argv) {
                 bool needs_model = false;
             };
             const size_t batch_capacity = std::max<size_t>(
-                8192U, static_cast<size_t>(model_workers) * 2048U);
+                32768U, static_cast<size_t>(model_workers) * 4096U);
             std::vector<ParallelRow> batch;
             batch.reserve(batch_capacity);
             uint64_t next_progress = options.progress;
