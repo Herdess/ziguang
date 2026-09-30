@@ -37,7 +37,7 @@ struct Options {
     fs::path generalization_model;
     uint64_t limit = 0;
     uint64_t progress = 0;
-    uint32_t workers = 0;
+    uint32_t workers = 1;
     srb::DelayMode mode = srb::DelayMode::Exact;
     srb::MarginConfig margin;
     std::string solver = "fast";
@@ -72,7 +72,7 @@ void usage(const char* program) {
         << "                      auto covers all legal source first-hop landings\n"
         << "  --limit N           process only the first N data rows (0 means all)\n"
         << "  --progress N        print progress every N rows (0 disables)\n"
-        << "  --workers N         local model threads (default automatic; 0 means automatic)\n";
+        << "  --workers N         local model threads (must be 0 or 1; competition execution is single-threaded)\n";
 }
 
 uint64_t parse_u64(const std::string& text, const std::string& option) {
@@ -113,7 +113,7 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--progress") options.progress = parse_u64(value(arg), arg);
         else if (arg == "--workers") {
             const uint64_t parsed = parse_u64(value(arg), arg);
-            if (parsed > 256) throw std::runtime_error("--workers must be at most 256");
+            if (parsed > 1) {
             options.workers = static_cast<uint32_t>(parsed);
         }
         else if (arg == "--margin") {
@@ -449,9 +449,9 @@ int main(int argc, char** argv) {
 
         uint64_t rows = 0;
         uint64_t unreachable = 0;
-        const uint32_t hardware_workers = std::max(1U, std::thread::hardware_concurrency());
-        const uint32_t model_workers = options.workers == 0
-            ? std::min(8U, hardware_workers) : std::max(1U, options.workers);
+        // The contest evaluates CPU time and permits exactly one thread.
+        // Keep all feature extraction and model inference on this caller thread.
+        const uint32_t model_workers = 1;
         constexpr uint64_t kPublicBlockRows = 1000000;
         const bool repeat_candidate = options.repeat_accel && public_cache &&
             options.limit == 0 && options.progress == 0 && options.path_output.empty();
