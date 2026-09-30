@@ -84,6 +84,18 @@ Windows 下可以直接构建和运行：
   -ModelFile C:\path\to\grid208_4x8_u16.bin
 ```
 
+从 GitHub Actions 下载 Linux artifact 后，与真实模型组装比赛提交包：
+
+```powershell
+python .\package_linux_submission.py `
+  --estimate .\ci_artifact\bin\estimate `
+  --model C:\path\to\grid208_4x8_u16.bin `
+  --output C:\path\to\submission.zip
+```
+
+脚本使用 Zip64，且会检查压缩包目录、CRC和 `bin/estimate` 的 Unix 可执行权限。最终ZIP只包含
+`bin/estimate` 与 `bin/grid208_4x8_u16.bin`。
+
 重新生成并检查残差规则：
 
 ```powershell
