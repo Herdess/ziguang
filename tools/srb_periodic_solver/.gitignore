@@ -1,0 +1,4 @@
+build/
+build_windows/
+output/
+__pycache__/

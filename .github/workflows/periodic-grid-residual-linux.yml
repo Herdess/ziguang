@@ -1,0 +1,64 @@
+name: Periodic Grid Residual Linux
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/periodic-grid-residual-98
+    paths:
+      - "tools/srb_periodic_solver/**"
+      - ".github/workflows/periodic-grid-residual-linux.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build optimized Linux executable
+        run: make -C tools/srb_periodic_solver -j2
+
+      - name: Create sparse smoke-test model
+        run: |
+          python3 tools/srb_periodic_solver/tests/create_sparse_smoke_model.py \
+            tools/srb_periodic_solver/build/grid208_4x8_u16.bin
+          stat --format='model_size=%s allocated_blocks=%b' \
+            tools/srb_periodic_solver/build/grid208_4x8_u16.bin
+
+      - name: Verify ELF and competition interface
+        run: |
+          set -euo pipefail
+          solver=tools/srb_periodic_solver/build/srb_periodic_solver
+          model=tools/srb_periodic_solver/build/grid208_4x8_u16.bin
+          output=tools/srb_periodic_solver/build/smoke_result.csv
+          "$solver" --help >/dev/null 2>&1
+          "$solver" \
+            -in tools/srb_periodic_solver/tests/request.csv \
+            -out "$output" \
+            --model "$model"
+          test "$(head -n 1 "$output")" = 'From,To,delay'
+          test "$(wc -l < "$output")" -eq 2
+          readelf -h "$solver" | grep -q 'Machine:.*Advanced Micro Devices X86-64'
+
+      - name: Assemble binary artifact
+        run: |
+          set -euo pipefail
+          mkdir -p tools/srb_periodic_solver/build/artifact/bin
+          cp tools/srb_periodic_solver/build/srb_periodic_solver \
+            tools/srb_periodic_solver/build/artifact/bin/estimate
+          chmod +x tools/srb_periodic_solver/build/artifact/bin/estimate
+          (cd tools/srb_periodic_solver/build/artifact && sha256sum bin/estimate > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: periodic-grid-residual-linux-x64
+          path: tools/srb_periodic_solver/build/artifact
+          if-no-files-found: error
+          retention-days: 14

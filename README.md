@@ -48,3 +48,12 @@ make -j
 - [优化方法说明](fpga-exact-astar/docs/OPTIMIZATION_METHODS.md)
 
 > 注意：公开 Golden 缓存来自已提供答案，并非从架构推导。如果比赛禁止答案查找表，请使用 `--no-public-cache` 或删除缓存模块。完全私有数据不能依靠公开缓存保证 100 分。
+
+## 周期网格独立实验分支
+
+本分支新增 [`tools/srb_periodic_solver/`](tools/srb_periodic_solver/)，采用 208-source、4×8、
+16-bit 周期网格和稀疏平移不变残差修正。它不保存具体 `From,To` 请求；后 8,483,192 条
+Golden 用于生成结构规则，公开 1,000,000 条完整留出，且两部分精确请求重合数为 0。
+
+本地留出 accuracy 为 98.069856，100 万条全部覆盖。该数字不是官方隐藏集成绩；完整数据哈希、
+生成条件、Windows复现步骤和Linux验证边界见该工具目录的 README。
