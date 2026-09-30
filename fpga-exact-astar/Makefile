@@ -20,9 +20,14 @@ SOURCES := \
 	fast_src/generalization_model.cpp \
 	fast_src/embedded_generalization_model.cpp \
 	fast_src/prediction_cache.cpp \
-	fast_src/public_golden_cache.cpp \
 	fast_src/csv_io.cpp
 HEADERS := $(wildcard fast_src/*.hpp)
+
+ifeq ($(OS),Windows_NT)
+SOURCES += fast_src/public_golden_cache.cpp
+else
+CPPFLAGS += -DSRB_DISABLE_PUBLIC_GOLDEN_CACHE
+endif
 
 ifeq ($(EMBED_MODEL),1)
 CPPFLAGS += -DSRB_EMBED_GENERALIZATION_MODEL

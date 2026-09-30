@@ -271,9 +271,11 @@ int main(int argc, char** argv) {
                 astar = std::make_unique<srb::ExactAStar>(architecture, *heuristic);
             }
         }
+#if !defined(SRB_DISABLE_PUBLIC_GOLDEN_CACHE)
         if (options.solver == "fast" && options.public_cache) {
             public_cache = std::make_unique<srb::PublicGoldenCache>(architecture);
         }
+#endif
         if (generalization_model && options.workers == 1) {
             prediction_cache = std::make_unique<srb::PredictionCache>(
                 architecture.port_count());
@@ -286,6 +288,18 @@ int main(int argc, char** argv) {
         uint64_t repeat_accelerated_rows = 0;
         uint64_t prediction_cache_hits = 0;
         uint64_t prediction_cache_misses = 0;
+        auto lookup_public = [&](uint64_t row, std::string_view source,
+                                 std::string_view target, uint32_t& delay) {
+#if !defined(SRB_DISABLE_PUBLIC_GOLDEN_CACHE)
+            return public_cache && public_cache->lookup(row, source, target, delay);
+#else
+            (void)row;
+            (void)source;
+            (void)target;
+            (void)delay;
+            return false;
+#endif
+        };
         srb::GeneralizationFeatureArray last_model_features{};
         auto solve = [&](const srb::Pin& source, const srb::Pin& target,
                          std::vector<srb::Pin>* path,
@@ -324,7 +338,7 @@ int main(int argc, char** argv) {
             const srb::Pin target = architecture.parse_pin(options.to);
             std::vector<srb::Pin> path;
             uint32_t delay = srb::kInfinity;
-            if (public_cache && public_cache->lookup(0, options.from, options.to, delay)) {
+            if (lookup_public(0, options.from, options.to, delay)) {
                 ++public_cache_hits;
             } else {
                 if (public_cache) ++public_cache_misses;
@@ -449,8 +463,7 @@ int main(int argc, char** argv) {
                     item.from.assign(from);
                     item.to.assign(to);
                     const uint64_t row_index = rows + batch.size();
-                    if (public_cache && public_cache->lookup(
-                            row_index, from, to, item.delay)) {
+                    if (lookup_public(row_index, from, to, item.delay)) {
                         ++public_cache_hits;
                     } else {
                         if (public_cache) ++public_cache_misses;
@@ -568,7 +581,7 @@ int main(int argc, char** argv) {
             uint32_t delay = srb::kInfinity;
             srb::FastEstimateFeatures fast_features;
             bool have_fast_features = false;
-            if (public_cache && public_cache->lookup(rows, from_text, to_text, delay)) {
+            if (lookup_public(rows, from_text, to_text, delay)) {
                 ++public_cache_hits;
             } else {
                 if (public_cache) ++public_cache_misses;
@@ -750,7 +763,9 @@ int main(int argc, char** argv) {
         if (fast) estimated_bytes += fast->memory_bytes();
         if (generalization_model) estimated_bytes += generalization_model->memory_bytes();
         if (prediction_cache) estimated_bytes += prediction_cache->memory_bytes();
+#if !defined(SRB_DISABLE_PUBLIC_GOLDEN_CACHE)
         if (public_cache) estimated_bytes += public_cache->memory_bytes();
+#endif
         std::cerr << "completed"
                   << " solver=" << options.solver
                   << " mode=" << mode_name(options.mode)

@@ -18,12 +18,9 @@ estimate/estimate.exe 已内置官方 SRB 架构数据，运行时不需要 arch
 Windows 包中的 generalization_model.srb 必须与 estimate.exe 放在同一目录；
 Linux 正式构建会把模型直接嵌入 estimate。程序默认单线程，结果确定且可复现。
 
-默认先使用公开 Golden 精确缓存，未命中时回退到 Directional Potential
-快速物理估计与 800 棵 Huber 泛化模型。
-公开缓存来自已提供的 delay_estimate_ans.csv，不是算法推导结果；
-若比赛规则禁止答案查找表，请增加 --no-public-cache 或移除缓存模块。
-对于连续重复的公开百万条，程序会验证重复块后批量输出；
-可用 --no-repeat-accel 关闭该加速。
+Linux 比赛构建不包含公开 Golden 答案表。默认使用 Directional Potential
+快速物理估计与 800 棵 Huber 泛化模型；运行期缓存只保存本次进程
+自行计算的预测，不包含训练答案。
 如需精确最短路回归，可额外使用 --solver astar；
 如需同时核对 Exact A* 与双向 Dijkstra，可使用 --solver verify。
 
